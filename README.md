@@ -576,7 +576,7 @@ Note: In prior literature (by others), "deserialization" meant "reset the machin
 
 More technical details:
 
-* The machine_id is also stored in the MDDF sector: the `init_machine_id` field is populated during the LOS or Workshop installation. The `master_machine_id` field is typically 0; I think it gets populated when you copy/backup/duplicate a ProiFile disk or a floppy disk, at which point the fields `DT_copied`, `DT_copy_created` also get populated). The `deserialize` command does not touch these fields; it seems that they are stored there by LOS for historical record keeping only.
+* The machine_id is also stored in the MDDF sector: the `init_machine_id` field is populated during the LOS or Workshop installation. The `master_machine_id` field is typically 0; I think it gets populated when you copy/backup/duplicate a ProiFile disk or a floppy disk, at which point the fields `DT_copied`, `DT_copy_created` also get populated. The `deserialize` command does not touch these fields; it seems that they are stored there by LOS for historical record keeping only.
 
 * The "open file" code path (GOPEN,
 `LISA_OS/OS/source-fsui1.text.unix.txt`) allows the file to be opened only if the file
