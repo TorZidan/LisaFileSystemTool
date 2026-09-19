@@ -709,7 +709,7 @@ formats in the host's local time zone. `0` means "never/undefined".
 * stepleton/bootloader `dc42_build_bootable_disk.py` — DC42 checksum algorithm
   (<https://github.com/stepleton/bootloader>).
 
-  ## 11. Relevant  / similar tools:
+## 11. Relevant  / similar tools:
 
 * The tool at https://github.com/alexthecat123/LOSSerialTool/blob/main/LOSSerialTool.py can deserialize floppy disk images (only). Its "-deserialize -clearbozo" mode does the same as the "deserialize" command of my tool: the -deserialize options clears the machine_id at offset 0x42 in the hint sector of the protecxted file, and the -clearbozo option clears the "protected" flag at offset 0x48 in the same hint sector. Unlike my tool, it does not scan the catalog to list all files, but instead looks for specific bytes in the file to try to locate each "hint sector".
 
@@ -717,10 +717,10 @@ formats in the host's local time zone. `0` means "never/undefined".
 
 * The tools at https://github.com/tfrikker/lisa_utils/tree/master/srcBuilder can list and dump files from a DC42 disk image. There is also an attempt to implement "add file", but it fails for me. Again, as I stated above, adding a file is "complicated".
 
-## 11. Disclaimer
+## 12. Disclaimer
 
 I used AI in this project, to write some of the code and parts of this doc.
 
-## 12. License
+## 13. License
 
 Published under the GNU General Public License v3.0.
