@@ -31,6 +31,115 @@ from LisaFileSystemTool import (
     interleave5,
 )
 
+# A Lisa ".TEXT" file is stored on disk as:
+#   [ 1024-byte header page (two zero-filled sectors) ] [ the text data ]
+# The structure of the text data is mandated by LisaOsTextFileSpecification.txt:
+#   * the header page is not part of the file's contents; per the spec, it is
+#     created with nulls in all 1024 bytes (this matches real .TEXT files on
+#     flat-catalog volumes and has been confirmed to work on the Lisa);
+#   * the text data is a sequence of 1024-byte pages (two sectors each);
+#   * a line is zero or more characters followed by a CR (0x0D);
+#   * each page contains complete lines only and is filled with nulls after
+#     the last line; the first CR-null (0x0D 0x00) pair in a page signals the
+#     end of the page;
+#   * a line may be at most 1023 bytes long counting the CR (with room for
+#     the terminating null at the end of the page); a line that does not fit
+#     in the space left on the current page is moved whole to the next page,
+#     leaving the previous page short (null-padded) — like the real Lisa text
+#     editor; a line longer than 1023 bytes is continued on the next page,
+#     with a CR inserted at the page boundary;
+#   * the text data ends with a CR; a null text file (no contents) is the
+#     1024-byte header page alone.
+# build_lisa_text_file_data() below builds such a byte stream in memory.
+# The "dump" command converts this layout back to host text when writing a
+# .TEXT file to the host (see lisa_text_file_to_host_text() in
+# LisaFileSystemTool.py).
+TEXT_FILE_PAGE_SIZE = 2 * SECTOR_SIZE_IN_BYTES  # one text page = two sectors
+TEXT_FILE_HEADER_SIZE = TEXT_FILE_PAGE_SIZE  # the header page is one 1024-byte page
+
+
+def build_lisa_text_file_data(content: bytes) -> bytes:
+    """Build the complete on-disk byte stream of a Lisa ".TEXT" file from raw host text.
+
+    Returns: [ 1024-byte all-null header page ] [ the page-structured text data ].
+    The layout implements the structure mandated by LisaOsTextFileSpecification.txt
+    (see the summary in the comment above the constants):
+
+      * host "\\r\\n" and "\\n" line endings are normalized to Lisa "\\r" first;
+        a file that already uses "\\r" line endings is left unchanged;
+      * the text data is laid out in 1024-byte pages; each page holds complete
+        lines only (each line terminated by a CR) and is null-filled after its
+        last line, so the first CR-null pair in the page signals its end;
+      * a line that does not fit in the space left on the current page is
+        moved whole to the next page, leaving the previous page short (null
+        padding) — like the real Lisa text editor — so "dump" → "addfile" →
+        "dump" is an exact round trip as long as no line is longer than
+        1023 bytes counting its CR;
+      * a line longer than 1023 bytes counting its CR cannot be represented
+        as one line; it is continued on the next page, with a CR inserted at
+        the page boundary (such an inserted CR appears as an extra line end
+        when the file is dumped again);
+      * the text data ends with a CR (one is appended if the content does not
+        already end with one);
+      * content with no text at all yields a null text file: the 1024-byte
+        header page alone.
+
+    The input is treated as an arbitrary stream of characters (any byte
+    sequence is accepted). Note that a NUL byte is an ordinary character in
+    this format, except that a CR followed by a NUL cannot be represented:
+    any reader will treat that pair as the end of the page.
+
+    The result is always a whole number of 1024-byte pages.
+    """
+    text = content.replace(b"\r\n", b"\r").replace(b"\n", b"\r")
+
+    if not text:
+        return bytes(TEXT_FILE_HEADER_SIZE)  # null text file: header page only
+
+    if not text.endswith(b"\r"):
+        text += b"\r"  # per the spec, text files end with a CR at CLOSE
+
+    out = bytearray(TEXT_FILE_HEADER_SIZE)  # null-filled header page
+    page = bytearray(TEXT_FILE_PAGE_SIZE)  # zero-filled: nulls after the last line
+    used = 0  # the number of content bytes on the current page
+    i, n = 0, len(text)
+    while i < n:
+        line_end = text.find(b"\r", i) + 1  # the end of the line, CR included
+        line_len = line_end - i
+        if line_len <= TEXT_FILE_PAGE_SIZE - 1:
+            # A complete line (at most 1023 bytes counting its CR):
+            if used + line_len > TEXT_FILE_PAGE_SIZE - 1:
+                # The line does not fit in the space left on this page. Like
+                # the real Lisa editor, leave the page short (null padding)
+                # and start the line on a fresh page:
+                out += page
+                page = bytearray(TEXT_FILE_PAGE_SIZE)
+                used = 0
+            page[used : used + line_len] = text[i:line_end]
+            used += line_len
+        else:
+            # A line longer than 1023 bytes counting its CR: continue it on
+            # the next page, with a CR inserted inside each full page (1022
+            # characters + CR). Start on a fresh page so that every chunk
+            # gets the full 1022-character run:
+            if used:
+                out += page
+                page = bytearray(TEXT_FILE_PAGE_SIZE)
+                used = 0
+            while line_end - i > TEXT_FILE_PAGE_SIZE - 1:
+                page[: TEXT_FILE_PAGE_SIZE - 2] = text[i : i + TEXT_FILE_PAGE_SIZE - 2]
+                page[TEXT_FILE_PAGE_SIZE - 2] = 0x0D
+                out += page
+                page = bytearray(TEXT_FILE_PAGE_SIZE)
+                used = 0
+                i += TEXT_FILE_PAGE_SIZE - 2
+            line_len = line_end - i
+            page[:line_len] = text[i:line_end]
+            used = line_len
+        i = line_end
+    out += page
+    return bytes(out)
+
 
 class AddFileMixin:
     """The "addfile" functionality: add_file() and its private helpers.
@@ -242,6 +351,16 @@ class AddFileMixin:
         All modified sectors get their tag checksums recomputed, and the DC42
         header checksums are fixed at the end.
 
+        Text files: if lisa_name ends in ".TEXT" (case-insensitive), the file's
+        complete on-disk byte stream is built in memory first, by
+        build_lisa_text_file_data(): host "\r\n"/"\n" line endings are
+        normalized to Lisa "\r", the text is laid out in 1024-byte pages per
+        LisaOsTextFileSpecification.txt (CR-terminated lines, null-filled
+        pages, CR-null page terminators, trailing CR), and the zero-filled
+        1024-byte header page is prepended (the "dump" command strips that
+        header). `data` is then exactly the byte stream written to the file's
+        data pages.
+
         Returns True on success, False otherwise.
         """
         # ---- preconditions ----
@@ -258,7 +377,6 @@ class AddFileMixin:
             return False
         with open(host_file_path, "rb") as f:
             data = f.read()
-        filesize = len(data)
 
         # ---- validate the Lisa file name ----
         if not lisa_name:
@@ -278,6 +396,16 @@ class AddFileMixin:
         if len(name_bytes) > 33:
             print(f"ERROR: '{lisa_name}' is {len(name_bytes)} Mac-Roman bytes; max is 33.")
             return False
+
+        # ---- ".TEXT" files (name ends in ".TEXT", case-insensitive) ----
+        # Build the complete on-disk byte stream in memory first (see
+        # build_lisa_text_file_data() for the page structure mandated by
+        # LisaOsTextFileSpecification.txt); `data` is then exactly what gets
+        # written to the file's data pages.
+        is_text_file = lisa_name.upper().endswith(".TEXT")
+        if is_text_file:
+            data = build_lisa_text_file_data(data)
+        filesize = len(data)
 
         mddf = self._mddf_sector_number
 
@@ -479,7 +607,17 @@ class AddFileMixin:
 
         self.fix_dc42_checksum(confirm=False)
 
-        print(f"Added '{lisa_name}' ({filesize} bytes) as s-file {new_sfile}.")
+        if is_text_file:
+            text_pages = (filesize - TEXT_FILE_HEADER_SIZE) // TEXT_FILE_PAGE_SIZE
+            print(
+                f"Added '{lisa_name}' as s-file {new_sfile}: "
+                f"{text_pages} text page(s) "
+                f"({filesize - TEXT_FILE_HEADER_SIZE} bytes of CR-terminated text, "
+                f"structured per LisaOsTextFileSpecification.txt) + "
+                f"1024-byte zero-filled header page = {filesize} bytes on disk."
+            )
+        else:
+            print(f"Added '{lisa_name}' ({filesize} bytes) as s-file {new_sfile}.")
         print(f"  hint pages (abs): {[mddf + p for p in hint_pages]}")
         print(f"  data pages (abs): {[mddf + p for p in data_pages]}")
         return True

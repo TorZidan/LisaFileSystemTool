@@ -47,7 +47,7 @@ python LisaFileSystemTool.py <command> <disk image file name>
 |-------------|--------------|
 | `info`      | Prints useful information about the disk image (format, sector count, disk name, DC42 checksums, disk type/format), then prints the MDDF fields (volume name, version, slist/bitmap/catalog pointers, …) and lists the sector numbers of each predefined sector type (MDDF, bitmap, s-record, catalog, boot, loader, erased, free). |
 | `list`      | Lists all files on the volume. For file systems of version 16/17 it walks the B-tree catalog (`dump_catalog()`); for file systems of version 14/15 it scans the s-list of the flat-catalog volume (`flat_catalog_list_files()`). |
-| `dump`      | Writes the contents of every file to the host folder **`/tmp/dc42-dump/`** (created if missing), preserving the names as stored on disk. The root catalog file itself is skipped, and "empty" file names are skipped. Text files (with file names ending with ".text" ) are dumped in a special way: we skip the first 1024 bytes, as they contain metadata. If the text file still looks wrong, it is because of the \r new-line symbols being used by LOS. You can fix it, e.g. on Linux we need to convert all \r to \n : `cat /tmp/dc42-dump/MY_TEXT_FILE.TEXT \| sed 's/\r/\n/g' ` |
+| `dump`      | Writes the contents of every file to the host folder **`/tmp/dc42-dump/`** (created if missing), preserving the names as stored on disk. The root catalog file itself is skipped, and "empty" file names are skipped. Text files (with file names ending with ".text" ) are dumped as plain host text: the 1024-byte on-disk header page and the null page padding are stripped, and the \r new-line symbols used by LOS are converted to \n, so no further conversion is needed. |
 | `deserialize` | Finds all theft-protected files (see §5.9), asks for y/N confirmation, then rewrites each file's hint sector (so the file can be opened on any machine), and fixes up all affected checksums. |
 | `fix_dc42_checksum`| For DC42 files: checks if the data and tag checksums are correct in the DC42 header, and fixes the incorrect ones, if any. |
 
@@ -464,7 +464,7 @@ Both catalog versions (Flat or B-Tree) converge on the same mechanics, driven by
 
 All data pages of file *N* are tagged `+N`, so an alternative way is to find all sectors whose tag carries the file's id, sort them and read them.
 
-The `dump` commands reads all files (into folder /tmp/dc42-dump). Text files (with file names ending with ".text" ) are dumped in a special way: we skip the first 1024 bytes, as they contain metadata. If the text file still looks wrong, it is because of the \r new-line symbols being used by LOS. You can fix it, e.g. on Linux we need to convert all \r to \n : `cat /tmp/dc42-dump/MY_TEXT_FILE.TEXT \| sed 's/\r/\n/g' `
+The `dump` commands reads all files (into folder /tmp/dc42-dump). Text files (with file names ending with ".text" ) are dumped as plain host text: the 1024-byte on-disk header page and the null page padding are stripped, and the \r new-line symbols used by LOS are converted to \n, so no further conversion is needed.
 
 ### 5.6 File names
 

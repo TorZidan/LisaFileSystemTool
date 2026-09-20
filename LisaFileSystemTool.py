@@ -205,9 +205,11 @@ Offset      Field Name     Field Type
 295          boot_environ : integer;  (* reserved for future use *)
            end;
 
-Note: if we copy a text file from a dc42 image to e.g. lunux, we can't just display the file text content,
-because the file has \r (0D) as the "new line" symbol, but Linux uses \r\n. One way to fix this is to use "sed", e.g.:
-cat /tmp/dc42-dump/MY_TEXT_FILE.TEXT | sed 's/\r/\r\n/g'
+Note: text files (names ending in ".TEXT") are dumped as plain host text by the
+"dump" command: the 1024-byte on-disk header page and the null page padding are
+stripped, and the Lisa CR (0D) line endings are converted to host "\n" (see
+lisa_text_file_to_host_text()), so a dumped text file can be displayed and edited
+directly on the host.
 """
 
 
@@ -1501,20 +1503,22 @@ class InMemoryFileSystem:
                 if output_dir and not os.path.exists(output_dir):
                     os.makedirs(output_dir)
                     print(f"Created directory: {output_dir}")
-                # Lisa OS text files are special: they always have metadata in the first two sectors
-                # (the text file header), which we don't want in the dump. So for file names ending
-                # in ".TEXT" (case-insensitive), we skip writing the first two sectors.
-                skip_first_two_sectors = file_name.upper().endswith(".TEXT")
-                # The expected size of the dump: the file size minus the skipped 1024-byte metadata preamble:
-                expected_output_size = file_size - (
-                    2 * SECTOR_SIZE_IN_BYTES if skip_first_two_sectors else 0
-                )
+                # Lisa OS text files are special: the on-disk layout is a 1024-byte
+                # header page (formatting metadata, not part of the file's contents)
+                # followed by 1024-byte pages of CR-terminated (0x0D) lines, each
+                # page null-padded after its last line (the first CR-null pair in a
+                # page ends the page). For file names ending in ".TEXT" (case-
+                # insensitive), we dump the inverse of that layout as plain host text:
+                # strip the header page and the null page padding, and convert the CR
+                # line endings to host "\n" (see lisa_text_file_to_host_text()).
+                is_text_file = file_name.upper().endswith(".TEXT")
                 with open(output_filename, "wb") as output_file_handler:
                     next_sector_to_read = file_content_start_sector_number
                     iteration_number = (
                         0  # Safety measure to prevent infinite loops below:
                     )
-                    total_bytes_written = 0
+                    total_bytes_read = 0
+                    raw_text_file_bytes = bytearray() if is_text_file else None
                     while True:
                         print(
                             f"  At file content sector {next_sector_to_read:#6} with file_id {self.get_file_id_type_from_tag_data_for_sector(next_sector_to_read)}"
@@ -1522,13 +1526,18 @@ class InMemoryFileSystem:
                         file_content_sector_bytes = self.read_sector(
                             next_sector_to_read
                         )
-                        # The file content starts at the very first sector of the chain (the s-record's
-                        # fileaddr points at the file's first data sector). Exception: for .TEXT files,
-                        # the first two sectors are the metadata preamble, which we skip (see above).
-                        # The last sector is usually only partially used; we truncate to the expected size below.
-                        if not (skip_first_two_sectors and iteration_number < 2):
+                        if is_text_file:
+                            # Accumulate the whole chain (including the two header
+                            # sectors): the on-disk text layout is converted to host
+                            # text only after the last sector has been read.
+                            raw_text_file_bytes += file_content_sector_bytes
+                        else:
+                            # The file content starts at the very first sector of the
+                            # chain (the s-record's fileaddr points at the file's
+                            # first data sector). The last sector is usually only
+                            # partially used; we truncate to the file size below.
                             output_file_handler.write(file_content_sector_bytes)
-                        total_bytes_written += len(file_content_sector_bytes)
+                        total_bytes_read += len(file_content_sector_bytes)
 
                         tags = self.read_tags_for_sector(next_sector_to_read)
                         # The fwd_link (next sector in the file's data chain) is 3 bytes at tag offsets
@@ -1547,16 +1556,22 @@ class InMemoryFileSystem:
                         iteration_number += 1
                         if iteration_number > 10000:
                             raise f"Infinite loop detected while reading contents of file_id {self.get_file_id_type_from_tag_data_for_sector(next_sector_to_read)}, file_name '{file_name}'! Perhaps the file system is corrupted? Exiting."
-                    if (
-                        expected_output_size > 0
-                        and total_bytes_written > expected_output_size
-                    ):
-                        # The file's last sector is only partially used: cut the dump down to the expected size:
-                        output_file_handler.truncate(expected_output_size)
-                    elif total_bytes_written < file_size:
+                    if total_bytes_read < file_size:
                         print(
-                            f"WARNING: the sector chain of file '{file_name}' is only {total_bytes_written} bytes long, shorter than its original file size of {file_size}!"
+                            f"WARNING: the sector chain of file '{file_name}' is only {total_bytes_read} bytes long, shorter than its original file size of {file_size}!"
                         )
+                    if is_text_file:
+                        # The last sector is only partially used: cut the raw data down
+                        # to the file size before converting (the header page is
+                        # stripped by lisa_text_file_to_host_text()):
+                        if file_size < len(raw_text_file_bytes):
+                            del raw_text_file_bytes[file_size :]
+                        output_file_handler.write(
+                            lisa_text_file_to_host_text(bytes(raw_text_file_bytes))
+                        )
+                    elif total_bytes_read > file_size:
+                        # The file's last sector is only partially used: cut the dump down to the file size:
+                        output_file_handler.truncate(file_size)
 
     def check_bitmap_for_all_file_data(self):
         """ """
@@ -2641,6 +2656,10 @@ class InMemoryFileSystem:
         """fs_version 14/15 variant of dump_files(): write the contents of every file in the
         slist to /tmp/dc42-dump/, following each file's tag chain (see
         flat_catalog_read_file_data()). The rootcatalog itself is not dumped as a file.
+        Like dump_files() above, ".TEXT" files are dumped as plain host text:
+        the 1024-byte header page and the null page padding are stripped, and
+        the CR line endings are converted to host "\n" (see
+        lisa_text_file_to_host_text()).
         """
         output_dir = "/tmp/dc42-dump"
         if not os.path.exists(output_dir):
@@ -2690,6 +2709,14 @@ class InMemoryFileSystem:
                 print(
                     f"WARNING: read {len(file_data)} bytes for file '{file_name}' (s_file_id={s_file_id}), but the slist says its size is {filesize} bytes!"
                 )
+            # Lisa OS text files are special: the on-disk layout is a 1024-byte header
+            # page followed by 1024-byte pages of CR-terminated lines, null-padded
+            # after the last line of each page. Dump them as plain host text, like
+            # dump_files() above: the inverse of build_lisa_text_file_data() from
+            # LisaFileSystemToolAddFile.py — strip the header page and the null page
+            # padding, and convert the Lisa CR line endings to host "\n".
+            if file_name.upper().endswith(".TEXT"):
+                file_data = lisa_text_file_to_host_text(file_data)
             output_filename = os.path.join(output_dir, file_name)
             with open(output_filename, "wb") as output_file_handler:
                 output_file_handler.write(file_data)
@@ -2756,6 +2783,50 @@ def pascal_to_string(pascal_string: bytes, encoding="mac-roman", start: int = 0)
         start + 1 : start + 1 + actual_length
     ]  # Extract the string bytes
     return dest.decode(encoding) if actual_length > 0 else ""
+
+
+def lisa_text_file_to_host_text(file_data: bytes) -> bytes:
+    """The inverse of LisaFileSystemToolAddFile.build_lisa_text_file_data():
+    convert the on-disk byte stream of a Lisa ".TEXT" file into plain host text.
+
+    The on-disk layout (see LisaOsTextFileSpecification.txt) is a 1024-byte
+    header page (all-null for files written by this tool, but real Lisa text
+    editors store formatting data there) followed by 1024-byte text pages;
+    each page contains
+    CR-terminated (0x0D) lines and is filled with nulls after the last line,
+    the first CR-null (0x0D 0x00) pair in a page signaling its end. This
+    function strips the header page and the null padding of every page, and
+    converts the Lisa CR line endings to host "\\n".
+
+    Notes:
+      * a page may end well before its 1023rd byte: real Lisa text editors
+        keep historical page boundaries, so the first CR-null pair can appear
+        at any position (it is always honored, as it is by Lisa readers);
+      * a page without a CR-null terminator (malformed) contributes its bytes
+        with the trailing nulls removed;
+      * a line longer than 1023 bytes was split across pages by the writer,
+        with a CR inserted at each page boundary (see
+        build_lisa_text_file_data()); those inserted CRs are indistinguishable
+        from real line ends, so they appear as extra "\\n" in the result;
+      * a null byte in the middle of a line (not after a CR) is kept as-is.
+    """
+    page_size = 2 * SECTOR_SIZE_IN_BYTES
+    # Strip the header page (not part of the file's contents). A ".TEXT" file
+    # is always at least one page long; a shorter (malformed) file is kept whole.
+    if len(file_data) >= page_size:
+        file_data = file_data[page_size :]
+    out = bytearray()
+    for off in range(0, len(file_data), page_size):
+        page = file_data[off : off + page_size]
+        pos = page.find(b"\r\x00")
+        if pos >= 0:
+            # The page's contents end at the first CR of the CR-null terminator:
+            out += page[: pos + 1]
+        else:
+            # Malformed page (no CR-null terminator): keep the data, drop the
+            # trailing null padding.
+            out += page.rstrip(b"\x00")
+    return bytes(out).replace(b"\r", b"\n")
 
 
 def compute_dc42_checksum_of_file_data_block(
