@@ -717,7 +717,7 @@ formats in the host's local time zone. `0` means "never/undefined".
 
 * The tool at https://github.com/arcanebyte/lisaem/blob/master/src/tools/src/lisafsh-tool.c can list and dump files from a DC42 disk image. It was written by Ray Arachelian (the LisaEm author) long before the LOS source files were open-sources, which was an impressive achievement.
 
-* The tools at https://github.com/tfrikker/lisa_utils/tree/master/srcBuilder can list and dump files from a DC42 disk image. There is also an attempt to implement "add file", but it fails for me. Again, as I stated above, adding a file is "complicated".
+* The tools at https://github.com/tfrikker/lisa_utils/tree/master/srcBuilder can list and dump files from a DC42 disk image. There is also an attempt to implement "add file", but it fails for me. Perhaps I did not try hard enough...
 
 ## 12. Disclaimer
 
