@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 #####################################################################################################
 # LisaFileSystemTool.py is a standalone Python tool for inspecting and modifying                    #
 # Apple Lisa Office System (LOS) and Workshop disk images. It understands two image container       #
@@ -11,6 +12,9 @@
 # Disclaimer: given that the Lisa OS source files are open-source and free-to-use now               #
 # (at https://info.computerhistory.org/apple-lisa-code), we believe that removing file copy         #
 # protection causes no harm or loss to Apple.                                                       #
+#                                                                                                   #
+# If you want to "add" files from your host machine to a disk image, use the adjacent tool          #
+# LisaFileSystemToolAddFile.py                                                                      #
 #                                                                                                   #
 # See the adjacent README.md file for usage.                                                        #
 #                                                                                                   #
@@ -1273,13 +1277,13 @@ class InMemoryFileSystem:
         """
         rel_sector_number = absolute_sector_number - self._mddf_sector_number
         first_relative_bitmap_start_sector_number = to_uint32_big_endian(
-            self.mddf_sector_bytes, 0x88
+            self._mddf_sector_bytes, 0x88
         )  # Stored in the MDDF sector at offsert 0x88 (136 decimal); usually set to 1, whi9ch means that the first bitmap sector is the one immediately after the MDDF sector
         first_abs_bitmap_start_sector_number = (
             first_relative_bitmap_start_sector_number + self._mddf_sector_number
         )
         num_bitmap_sectors = to_uint16_big_endian(
-            self.mddf_sector_bytes, 0x92
+            self._mddf_sector_bytes, 0x92
         )  # Stored in the MDDF sector at offset 0x92 (146 decimal);
         relative_bitmap_sector_num = int(
             rel_sector_number / 4096
@@ -1311,16 +1315,16 @@ class InMemoryFileSystem:
 
     def dump_free_bitmap_sectors_numbers(self):
         num_bits_in_allocation_bitmap = to_uint32_big_endian(
-            self.mddf_sector_bytes, 0x8C
+            self._mddf_sector_bytes, 0x8C
         )  # Stored in the MDDF sector at offset 0x8C (140 decimal); there is one bit per sector, so it is usually set to the total number of sectors in the volume  minus the MDDF sector number.
         first_relative_bitmap_start_sector_number = to_uint32_big_endian(
-            self.mddf_sector_bytes, 0x88
+            self._mddf_sector_bytes, 0x88
         )  # Stored in the MDDF sector at offsert 0x88 (136 decimal); usually set to 1, whi9ch means that the first bitmap sector is the one immediately after the MDDF sector
         first_abs_bitmap_start_sector_number = (
             first_relative_bitmap_start_sector_number + self._mddf_sector_number
         )
         num_bitmap_sectors = to_uint16_big_endian(
-            self.mddf_sector_bytes, 0x92
+            self._mddf_sector_bytes, 0x92
         )  # Stored in the MDDF sector at offset 0x92 (146 decimal);
         print(
             f"\nDumping all free sector numbers from the bitmap sectors (with numbers from {first_abs_bitmap_start_sector_number} to {first_abs_bitmap_start_sector_number + num_bitmap_sectors -1}) : "
@@ -1357,13 +1361,13 @@ class InMemoryFileSystem:
 
     def dump_bitmap_sectors(self):
         first_relative_bitmap_start_sector_number = to_uint32_big_endian(
-            self.mddf_sector_bytes, 0x88
+            self._mddf_sector_bytes, 0x88
         )  # Stored in the MDDF sector at offsert 0x88 (136 decimal); usually set to 1, whi9ch means that the first bitmap sector is the one immediately after the MDDF sector
         bitmap_start_sector_number = (
             first_relative_bitmap_start_sector_number + self._mddf_sector_number
         )
         num_bitmap_sectors = to_uint16_big_endian(
-            self.mddf_sector_bytes, 0x92
+            self._mddf_sector_bytes, 0x92
         )  # Stored in the MDDF sector at offset 0x92 (146 decimal);
         print(
             f"\nDumping all bitmap sectors (with numbers from {bitmap_start_sector_number} to {bitmap_start_sector_number + num_bitmap_sectors -1}) : "

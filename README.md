@@ -682,7 +682,7 @@ formats in the host's local time zone. `0` means "never/undefined".
 
 * Can this tool remove password protections? Answer: No. Long answer: LOS allows setting up a password for specific files (select the file's icon, then use the File->Attributes of ..." menu to set/remove a password). The password is being encrypted and stored in the "hint sector" of the file and it can be printed by this too (see function `print_hint_sector_info()`). The `deserialize` tool command does not deal with these files, but this feature could be added. 
 
-* Can this tool do any other kinds of "edits", e.g. can it add a new file? Answer: No. Adding a new file is challenging, because it involves re-shuffling of the catalog tree, to keep it sorted (alphabetically, by file name). In addition, it has to find free blocks for the file data, update the allocation bitmap, etc. An AI can help coding this functionality, but I have not tried. 
+* Can this tool do any other kinds of "edits", e.g. can it add a new file to a disk image? Answer: This is a work in progress! You can do so using the tool LisaFileSystemToolAddFile.py . It currently works only with the "flat" file system, such as the one found in LOS 1.0. 
 
 ---
 
