@@ -710,6 +710,8 @@ formats in the host's local time zone. `0` means "never/undefined".
 * Lisa serial number format at https://lisalist2.com/index.php?topic=313.0
 * stepleton/bootloader `dc42_build_bootable_disk.py` — DC42 checksum algorithm
   (<https://github.com/stepleton/bootloader>).
+* LOS/Workshop text file format at https://www.bitsavers.org/pdf/apple/lisa/toolkit_3.0/Package_2_Examples/17_Lisa_Development_System_Internals_Documentation_Feb84.pdf
+  , pages 37 and 38.
 
 ## 11. Relevant  / similar tools:
 

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 #####################################################################################################
 # LisaFileSystemToolAddFile.py implements the "addfile" command: it adds a host file to a           #
-# flat-catalog (LOS 1.x, fs_version 14/15) disk image as a new Lisa file.                           #
+# LOS/Workshop disk image. Works with both binary and text files.                                   #
 #                                                                                                   #
 # It is a thin extension of the adjacent LisaFileSystemTool.py: all the disk-image machinery        #
 # (DC42/Raw ProFile parsing, MDDF, slist, catalog, tags, checksums, ...) is imported from there,    #
-# and only the addfile-specific code lives in this file (in the AddFileMixin class below).         #
+# and only the addfile-specific code lives in this file (in the AddFileMixin class below).          #
 #                                                                                                   #
 # Usage:                                                                                            #
 #   python LisaFileSystemToolAddFile.py addfile <disk image file name> <host file> <lisa file name> #
@@ -13,7 +13,7 @@
 # THIS IS EXPERIMENTAL CODE !!!                                                                     #
 #                                                                                                   #
 # Author: TorZidan                                                                                  #
-# Date: Sept 19, 2026                                                                               #
+# Date: Sept 20, 2026                                                                               #
 # License: Published under the GNU General Public License v3.0.                                     #
 #####################################################################################################
 
@@ -1115,8 +1115,8 @@ class AddFileMixin:
 
         # ---- ".TEXT" files (name ends in ".TEXT", case-insensitive) ----
         # Build the complete on-disk byte stream in memory first (see
-        # build_lisa_text_file_data() for the page structure mandated by
-        # LisaOsTextFileSpecification.txt); `data` is then exactly what gets
+        # build_lisa_text_file_data() for the text file binary structure
+        # `data` is then exactly what gets
         # written to the file's data pages.
         is_text_file = lisa_name.upper().endswith(".TEXT")
         if is_text_file:
