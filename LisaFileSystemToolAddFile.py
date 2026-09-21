@@ -107,6 +107,28 @@ class _BTreeNode:
         return rec[4:40] if self.kind == BTREE_NONLEAF else rec[0:36]
 
 
+def strip_archive_trailing_0xff(data: bytes) -> bytes:
+    """Remove the single 0xFF byte the Lisa OS source archive appends to the end of its text files.
+
+    (Almost) every file in the CHM "Lisa_Source" tree ends with one 0xFF byte
+    (Mac Roman "ÿ") — either as the very last byte or as a final line right
+    before the trailing newline(s).  It is an archiving artifact, not content:
+    the Lisa Pascal compiler rejects it with "illegal character in input", and
+    the Lisa editor shows it as a stray "?" at the end of the file.
+
+    Only a 0xFF with nothing but CR/LF bytes after it is removed; a 0xFF
+    followed by any other content (legitimate text) is left untouched, as is
+    any 0xFF in the middle of the file.  Returns the (possibly shorter)
+    byte string.
+    """
+    i = data.rfind(b"\xff")
+    if i < 0:
+        return data
+    if any(b not in (0x0D, 0x0A) for b in data[i + 1 :]):
+        return data
+    return data[:i]
+
+
 def build_lisa_text_file_data(content: bytes) -> bytes:
     """Build the complete on-disk byte stream of a Lisa ".TEXT" file from raw host text.
 
@@ -785,7 +807,7 @@ class AddFileMixin:
             ins_index = par_idx + 1
             level -= 1
 
-    def _add_file_btree(self, host_file_path: str, lisa_name: str) -> bool:
+    def _add_file_btree(self, host_file_path: str, lisa_name: str) -> "bool | str":
         """Add a host file into a b-tree-catalog (fs_version 16/17) volume as a
         new Lisa file.
 
@@ -799,7 +821,8 @@ class AddFileMixin:
         and root_page/tree_depth if the tree grows), the allocation bitmap, the
         tag checksums and the DC42 header checksums are all updated.
 
-        Returns True on success, False otherwise.
+        Returns True on success, the string "exists" if a file with the same
+        name is already on the volume, and False on any other failure.
         """
         if self._single_tag_size != 20:
             print("ERROR: addfile currently supports only 20-byte-tag (hard disk) images.")
@@ -821,9 +844,9 @@ class AddFileMixin:
                 f"ERROR: Lisa file name '{lisa_name}' is {len(lisa_name)} chars; max is {BTREE_MAX_NAME} on a b-tree volume."
             )
             return False
-        if "/" in lisa_name:
-            print(f"ERROR: Lisa file name '{lisa_name}' contains '/'; not allowed at the top level.")
-            return False
+        # Lisa does not treat '/' as a folder delimiter in file names (real
+        # volumes contain names like 'ALEX/ASM/APDM.TEXT'), so '/' is an
+        # ordinary character and is allowed.
         try:
             name_bytes = lisa_name.encode("mac-roman")
         except UnicodeEncodeError as e:
@@ -838,7 +861,10 @@ class AddFileMixin:
         # ---- ".TEXT" files (same as the flat path) ----
         is_text_file = lisa_name.upper().endswith(".TEXT")
         if is_text_file:
-            data = build_lisa_text_file_data(data)
+            cleaned = strip_archive_trailing_0xff(data)
+            if cleaned != data:
+                print(f"NOTE: stripped the archive's trailing 0xFF byte from '{host_file_path}'.")
+            data = build_lisa_text_file_data(cleaned)
         filesize = len(data)
 
         mddf = self._mddf_sector_number
@@ -997,8 +1023,10 @@ class AddFileMixin:
             print(f"ERROR: {e}")
             return False
         if not ok:
-            print(f"ERROR: a file named '{lisa_name}' already exists on this volume.")
-            return False
+            print(
+                f"WARNING: a file named '{lisa_name}' already exists on this volume; not adding it."
+            )
+            return "exists"
         # the pages consumed from free_set are exactly the new node pages
         consumed = sorted(free_before - free_set)
         cset = set(consumed)
@@ -1054,7 +1082,7 @@ class AddFileMixin:
             print(f"  new root page (abs): {mddf + new_root}; tree depth increased to {self._mddf_u16(0x132)}")
         return True
 
-    def add_file(self, host_file_path: str, lisa_name: str) -> bool:
+    def add_file(self, host_file_path: str, lisa_name: str) -> "bool | str":
         """Add a host file into this flat-catalog (fs_version 14/15) volume as a new Lisa file.
 
         This replicates the OS's MAKE_ENTRY + NEW_SFILE + APPENDPAGES + write path
@@ -1075,7 +1103,8 @@ class AddFileMixin:
         header). `data` is then exactly the byte stream written to the file's
         data pages.
 
-        Returns True on success, False otherwise.
+        Returns True on success, the string "exists" if a file with the same
+        name is already on the volume, and False on any other failure.
         """
         # ---- preconditions ----
         if not self.is_flat_catalog_volume():
@@ -1101,9 +1130,8 @@ class AddFileMixin:
         if len(lisa_name) > 33:
             print(f"ERROR: Lisa file name '{lisa_name}' is {len(lisa_name)} chars; max is 33.")
             return False
-        if "/" in lisa_name:
-            print(f"ERROR: Lisa file name '{lisa_name}' contains '/'; not allowed in a flat catalog.")
-            return False
+        # Lisa does not treat '/' as a folder delimiter in file names, so
+        # names containing '/' are allowed (same as on b-tree volumes).
         try:
             name_bytes = lisa_name.encode("mac-roman")
         except UnicodeEncodeError as e:
@@ -1120,7 +1148,10 @@ class AddFileMixin:
         # written to the file's data pages.
         is_text_file = lisa_name.upper().endswith(".TEXT")
         if is_text_file:
-            data = build_lisa_text_file_data(data)
+            cleaned = strip_archive_trailing_0xff(data)
+            if cleaned != data:
+                print(f"NOTE: stripped the archive's trailing 0xFF byte from '{host_file_path}'.")
+            data = build_lisa_text_file_data(cleaned)
         filesize = len(data)
 
         mddf = self._mddf_sector_number
@@ -1183,8 +1214,10 @@ class AddFileMixin:
             print("ERROR: the rootcatalog is full; cannot add the file.")
             return False
         if slot < 0:
-            print(f"ERROR: a file named '{lisa_name}' already exists on this volume.")
-            return False
+            print(
+                f"WARNING: a file named '{lisa_name}' already exists on this volume; not adding it."
+            )
+            return "exists"
 
         # ---- page-tag version/volume fields ----
         # Every page label (hint AND data) must carry the s-file's sentry version,
@@ -1327,10 +1360,9 @@ class AddFileMixin:
             text_pages = (filesize - TEXT_FILE_HEADER_SIZE) // TEXT_FILE_PAGE_SIZE
             print(
                 f"Added '{lisa_name}' as s-file {new_sfile}: "
-                f"{text_pages} text page(s) "
-                f"({filesize - TEXT_FILE_HEADER_SIZE} bytes of CR-terminated text, "
-                f"structured per LisaOsTextFileSpecification.txt) + "
-                f"1024-byte zero-filled header page = {filesize} bytes on disk."
+                f"{text_pages} text page(s), "
+                f"consisting of a {TEXT_FILE_HEADER_SIZE}-bytes all-zeroes header and "
+                f"({filesize - TEXT_FILE_HEADER_SIZE} bytes of CR-terminated text."
             )
         else:
             print(f"Added '{lisa_name}' ({filesize} bytes) as s-file {new_sfile}.")
@@ -1355,6 +1387,10 @@ if __name__ == "__main__":
         )
         print(
             "This tool implements the 'addfile' command; use LisaFileSystemTool.py for the other commands."
+        )
+        print(
+            "Exit codes: 0 = file added; 3 = a file with that name already exists "
+            "(nothing was added); 1 = any other failure."
         )
         sys.exit(1)
 
@@ -1385,5 +1421,13 @@ if __name__ == "__main__":
         )
         sys.exit(1)
 
-    file_system.add_file(host_file, lisa_name)
+    result = file_system.add_file(host_file, lisa_name)
+    if result == "exists":
+        # The name is already on the volume (see WARNING above). A distinct
+        # exit code so that callers re-running an upload list (upload_files.sh)
+        # can count "already there" separately from "added" (exit 0) and from
+        # a real failure (exit 1).
+        sys.exit(3)
+    if result is not True:
+        sys.exit(1)
     # That's all, Folks!

@@ -1489,7 +1489,7 @@ class InMemoryFileSystem:
                     f"s_record_index={s_record_index}, file_data_start_sector_number={file_content_start_sector_number}, hint_sector_number={hint_sector_number},"
                     f" file_name={file_name}, file_size={file_size} bytes, file_version={file_version}"
                 )
-                if file_name == "" or "/" in file_name or "\x00" in file_name:
+                if file_name == "" or "\x00" in file_name:
                     # The file name (from a stale/corrupt hint sector) is empty or contains a
                     # character that cannot appear in a Linux file name: skip it rather than crash.
                     print(
@@ -1497,7 +1497,17 @@ class InMemoryFileSystem:
                     )
                     continue
 
-                output_filename = "/tmp/dc42-dump/" + file_name
+                output_filename = os.path.normpath("/tmp/dc42-dump/" + file_name)
+                # Lisa does not treat '/' as a folder delimiter in file names, but
+                # when saving to the host file system we use it as one: a file
+                # named 'apbg/BG1A.TEXT' is written into the apbg/ subfolder of
+                # the dump folder. Skip any name that would otherwise escape the
+                # dump folder (a leading '/' or '..' components).
+                if not output_filename.startswith("/tmp/dc42-dump" + os.sep):
+                    print(
+                        f"Skipping file with an unsafe file name {file_name!r}: s_record_index={s_record_index}"
+                    )
+                    continue
                 # Ensure the output directory exists
                 output_dir = os.path.dirname(output_filename)
                 if output_dir and not os.path.exists(output_dir):
@@ -2696,10 +2706,13 @@ class InMemoryFileSystem:
                     f"Skipping this empty file name: s_file_id={s_file_id}, file_name='{file_name}'"
                 )
                 continue
-            if "/" in file_name or "\x00" in file_name:
-                # The file name (from a stale/corrupt hentry) contains a character that cannot
-                # appear in a Linux file name (the path separator or a null byte): skip it
-                # rather than crash.
+            if "\x00" in file_name:
+                # The file name (from a stale/corrupt hentry) contains a
+                # character that cannot appear in a Linux file name (a null
+                # byte): skip it rather than crash. (A '/' in the name is fine:
+                # Lisa does not treat it as a folder delimiter, and when saving
+                # to the host we use it as one, writing the file into a
+                # matching subfolder of the dump folder.)
                 print(
                     f"Skipping file with an invalid file name {file_name!r}: s_file_id={s_file_id}"
                 )
@@ -2717,7 +2730,20 @@ class InMemoryFileSystem:
             # padding, and convert the Lisa CR line endings to host "\n".
             if file_name.upper().endswith(".TEXT"):
                 file_data = lisa_text_file_to_host_text(file_data)
-            output_filename = os.path.join(output_dir, file_name)
+            output_filename = os.path.normpath(os.path.join(output_dir, file_name))
+            # Skip any name that would escape the dump folder (a leading '/' or
+            # '..' components).
+            if not output_filename.startswith(output_dir + os.sep):
+                print(
+                    f"Skipping file with an unsafe file name {file_name!r}: s_file_id={s_file_id}"
+                )
+                continue
+            # Ensure the output directory exists (file names containing '/' are
+            # saved into matching subfolders).
+            parent_dir = os.path.dirname(output_filename)
+            if not os.path.exists(parent_dir):
+                os.makedirs(parent_dir)
+                print(f"Created directory: {parent_dir}")
             with open(output_filename, "wb") as output_file_handler:
                 output_file_handler.write(file_data)
             num_files_written += 1
@@ -3341,7 +3367,8 @@ if __name__ == "__main__":
         )
         print("  list           List the files on the disk image.")
         print(
-            "  dump           Dump all files from the disk image into folder /tmp/dc42-dump."
+            "  dump           Dump all files from the disk image into folder /tmp/dc42-dump"\
+            " (a '/' in a Lisa file name becomes a subfolder there)."
         )
         print(
             "  fix_dc42_checksum  Fix the DC42 header data/tags checksums, but only if they are wrong."
