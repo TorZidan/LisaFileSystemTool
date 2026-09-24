@@ -179,7 +179,7 @@ Read my https://github.com/arcanebyte/lisaem/blob/master/LisaEmAsASoftwareDevelo
 Download and run the most recent "continuous" build for your platform from https://github.com/arcanebyte/lisaem/releases (the "2.0" release is missing important bug fixes).
 Configure LisaEm to use 1.5 MB or RAM, H-ROMs, "I/O ROM of "88". Mount the `LOS_Compilation_Base.image` on the "internal" parallel port. 
 
-The follow the instructions above.
+The follow the instructions "on a real Lisa" above.
 
 This process has been verified to works repeatedly and consistently well, with no crashes. On my PC, it takes about a minute to "upload" the lisa source files (using the shell script above), and about 5 minutes to compile everything (except LisaGuide) at top emulation speed (Throttle->512Mhz).
 
