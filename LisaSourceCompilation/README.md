@@ -136,19 +136,16 @@ Each individual upload uses the tool's exit codes: `0` = added,
 
 ## The disk image
 
-`LOS_Compilation_Base_original.image` (and thus `LOS_Compilation_Base.image`)
-is a copy of
+`LOS_Compilation_Base.image` is a copy of
 ["LOS Compilation Base.image"](https://github.com/alexthecat123/LisaSourceCompilation/blob/main/LOS%20Compilation%20Base.image.zip)
 from Alexander McLeod's
 [LisaSourceCompilation](https://github.com/alexthecat123/LisaSourceCompilation)
 repository. It contains a fresh installation of LOS 3.0 and Workshop 3.0
 plus his build scripts. It does NOT contain the Lisa OS source files.
 
-
 ## Credits and Thanks
 Thanks to [Alexander McLeod](https://github.com/alexthecat123) for preparing the `LOS_Compilation_Base.image` and for
 figuring out how to compile the Lisa OS sources in the first place. 
-
 
 ## How to compile the Lisa OS sources on a real Lisa 
 
@@ -182,6 +179,3 @@ The follow the instructions "on a real Lisa" above.
 This process has been verified to works repeatedly and consistently well, with no crashes. On my PC, it takes about a minute to "upload" the lisa source files (using the shell script above), and about 5 minutes to compile everything (except LisaGuide) at top emulation speed (Throttle->512Mhz).
 
 Enjoy!
-
-
-
