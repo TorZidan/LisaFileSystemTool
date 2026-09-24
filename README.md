@@ -21,10 +21,11 @@ volumes, and works with every known LOS file-system version (v14 = LOS 1.0 throu
 i.e. both the old "flat catalog" volumes and the newer HFS-style B-tree catalog volumes). 
 
 A companion tool, `LisaFileSystemToolPerFile.py` (described in §1.3), extends it with the
-`add` file and `replace` file commands: it can add a new file to a disk image, or replace the contents of
-an existing file, on both flat-catalog (LOS 1.0/2.0) and B-tree (LOS 3.0/3.1) hard-disk volumes.
+`add` file, `replace` file and `delete` file commands: it can add a new file to a disk image,
+replace the contents of an existing file, or delete a file, on both flat-catalog (LOS 1.0/2.0)
+and B-tree (LOS 3.0/3.1) hard-disk volumes.
 It is a thin extension of `LisaFileSystemTool.py` — all the disk-image machinery is imported
-from there, and only the add/replace-specific code lives in the second file.
+from there, and only the add/replace/delete-specific code lives in the second file.
 
 The tool can remove file copy protection from such disk images (if any is present), which makes
 them more universal: they are no-longer tied to a specific Lisa serial number, and thus can be used (run successfully) on any real and emulated Lisa. 
@@ -72,24 +73,28 @@ Practical limits: the whole image is read into memory; files longer than
 100 000 000 bytes are rejected; DC42 images with `tagSize == 0` are rejected (the tool
 needs the tag fields to navigate the file system).
 
-### 1.3 The companion tool `LisaFileSystemToolPerFile.py` — adding and replacing files
+### 1.3 The companion tool `LisaFileSystemToolPerFile.py` — adding, replacing and deleting files
 
 `LisaFileSystemToolPerFile.py` is a companion tool that **writes** files onto a disk image.
 It is a thin extension of `LisaFileSystemTool.py` (all the disk-image machinery is imported
-from there; only the add/replace-specific code lives in this file). **It is experimental.**
+from there; only the add/replace/delete-specific code lives in this file). **It is experimental.**
 
 ```
 python LisaFileSystemToolPerFile.py add     <disk image file name> <host file> <lisa file name>
 python LisaFileSystemToolPerFile.py replace <disk image file name> <host file> <lisa file name>
+python LisaFileSystemToolPerFile.py delete  <disk image file name> <lisa file name>
 ```
 
 | Command   | What it does |
 |-----------|--------------|
 | `add`     | Adds the host file to the volume as a new file with the given Lisa name. A new s-file number, hint and data pages, and a catalog entry are allocated and written, and all affected checksums are fixed up. If a file with the same name already exists, nothing is written. |
 | `replace` | Replaces the contents of an existing file (found by name, case-insensitive) in place, reusing the file's existing sectors: if the new file is larger, only the extra sectors are newly allocated; if it is smaller, the unused old sectors are freed. If no file with that name exists, nothing is changed. |
+| `delete`  | Deletes a regular file (found by name, case-insensitive): the catalog entry is removed, the file's data and hint pages are released to the free pool, and the s-list sentry is emptied, exactly as the OS `kill_sfile`/`Ddelete` paths do. On B-tree volumes the catalog record is removed with the OS b-tree deletion algorithm (including the underflow rebalancing: merge or rotate with the sibling, propagation up to the root, and tree-depth shrink when the root becomes empty); freed catalog nodes are zeroed and their pages returned to the free pool. On flat-catalog volumes the centry is cleared per the OS `KILL_ENTRY` rules (including entries that straddle catalog page boundaries). Directories and other non-file catalog entries are rejected. The MDDF counters (`filecount`, `freecount`, `fs_overhead`, `empty_file`, and — on B-tree volumes — `root_page`/`tree_depth`) are all kept consistent, and every affected sector's tag checksum and the DC42 checksums (if any) are fixed up. If the MDDF `tree_depth` field turns out to be stale (e.g. after an interrupted operation), it is corrected from the actual tree structure and a warning is printed. |
 
 Exit codes: `0` = success; `3` = nothing was done (`add`: a file with that name already exists /
-`replace`: no file with that name on the volume); `1` = any other failure. 
+`replace`: no file with that name on the volume / `delete`: no file with that name on the volume);
+`1` = any other failure (including: `delete` given the name of a directory or other non-file
+catalog entry). 
 
 **Text files**: if the Lisa file name ends with ".TEXT" (case-insensitive), the host file is
 first converted to the on-disk Lisa text layout (see `LisaOsTextFileSpecification.txt`):

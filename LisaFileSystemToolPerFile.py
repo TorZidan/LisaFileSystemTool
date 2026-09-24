@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #####################################################################################################
-# LisaFileSystemToolPerFile.py implements the "add" and "replace" commands:                          #
-# they add / replace a host file on a LOS/Workshop disk image. Works with both binary and text files. #
+# LisaFileSystemToolPerFile.py implements the "add", "replace", and "delete" commands:                  #
+# they add / replace / delete a host file on a LOS/Workshop disk image. Works with binary and text.    #
 #                                                                                                    #
 # It is a thin extension of the adjacent LisaFileSystemTool.py: all the disk-image machinery         #
 # (DC42/Raw ProFile parsing, MDDF, slist, catalog, tags, checksums, ...) is imported from there,     #
@@ -11,6 +11,7 @@
 # Usage:                                                                                             #
 #   python LisaFileSystemToolPerFile.py add      <disk image file name> <host file> <lisa file name> #
 #   python LisaFileSystemToolPerFile.py replace  <disk image file name> <host file> <lisa file name> #
+#   python LisaFileSystemToolPerFile.py delete   <disk image file name> <lisa file name>             #
 #                                                                                                   #
 # THIS IS EXPERIMENTAL CODE !!!                                                                     #
 #                                                                                                   #
@@ -755,14 +756,22 @@ class AddFileMixin:
         rotate with a sibling (Split_Rotate), else split and promote the low
         key of the right node (with a brand-new root if the root splits).
 
-        Returns (ok, new_root_page): ok is False if the key already exists;
-        new_root_page is the MDDF-relative page of a freshly created root, or
-        None.  (MDDF root_page/tree_depth, fs_overhead and the allocation
-        bitmap are updated by the caller.)"""
+        Returns (ok, new_root_page, actual_depth): ok is False if the key
+        already exists; new_root_page is the MDDF-relative page of a freshly
+        created root, or None; actual_depth is the tree depth measured from
+        the real tree structure (len(path)), which the caller uses to keep
+        the MDDF tree_depth field in sync (self-healing a stale value).
+        (MDDF root_page/tree_depth, fs_overhead and the allocation bitmap
+        are updated by the caller.)"""
         node, index, path, found = self._bt_search(key)
         if found:
-            return False, None
-        depth = self._mddf_u16(0x132)
+            return False, None, len(path)
+        # NB: the level bookkeeping comes from the ACTUAL descent (len(path)),
+        # not from the MDDF tree_depth field: if that field is stale (e.g. a
+        # previously interrupted write), deriving the parent chain from it
+        # would mix tree levels and corrupt the catalog.  len(path) is the
+        # true depth, and the caller writes it back to the MDDF.
+        depth = len(path)
         level = depth - 1  # 0-based from the root; the leaf is depth-1
         ins_rec = rec
         ins_index = index
@@ -770,7 +779,7 @@ class AddFileMixin:
         while True:
             if self._bt_simple_insert(node, ins_rec, ins_index):
                 self._bt_write_node(node, modified)
-                return True, None
+                return True, None, depth
             if level == 0:
                 # the root is full: split it and grow the tree (InsertSplit)
                 lft, rgt = self._bt_split_node(
@@ -784,7 +793,7 @@ class AddFileMixin:
                     struct.pack(">I", rgt.page) + rgt.first_key(),
                 ]
                 self._bt_write_node(root, modified)
-                return True, root.page
+                return True, root.page, depth
             # a parent exists (Split_Rotate: Siblings, then rotate, then split)
             par_page, par_idx = path[level - 1]
             parent = self._bt_read_node(par_page)
@@ -815,7 +824,7 @@ class AddFileMixin:
                     pr = parent.records[par_idx]
                     parent.records[par_idx] = pr[:4] + node.first_key()
                     self._bt_write_node(parent, modified)
-                    return True, None
+                    return True, None, depth
             if right_sib != BTREE_BAD:
                 R = self._bt_read_node(right_sib)
                 rotPt = self._bt_rotate_point(node, R, ins_index, len(ins_rec))
@@ -828,7 +837,7 @@ class AddFileMixin:
                     pr = parent.records[par_idx + 1]
                     parent.records[par_idx + 1] = pr[:4] + R.first_key()
                     self._bt_write_node(parent, modified)
-                    return True, None
+                    return True, None, depth
             lft, rgt = self._bt_split_node(node, ins_index, ins_rec, free_set, modified)
             # promote the low key of the right node up one level
             node = parent
@@ -836,7 +845,7 @@ class AddFileMixin:
             ins_index = par_idx + 1
             level -= 1
 
-    def _add_file_btree(self, host_file_path: str, lisa_name: str) -> "bool | str":
+    def _add_file_btree(self, host_file_path: str, lisa_name: str) -> "int":
         """Add a host file into a b-tree-catalog (fs_version 16/17) volume as a
         new Lisa file.
 
@@ -850,15 +859,15 @@ class AddFileMixin:
         and root_page/tree_depth if the tree grows), the allocation bitmap, the
         tag checksums and the DC42 header checksums are all updated.
 
-        Returns True on success, the string "exists" if a file with the same
-        name is already on the volume, and False on any other failure.
+        Returns the exit code to use: 0 on success, 3 if a file with the
+        same name is already on the volume, and 1 on any other failure.
         """
         if self._single_tag_size != 20:
             print("ERROR: add currently supports only 20-byte-tag (hard disk) images.")
-            return False
+            return 1
         if not os.path.isfile(host_file_path):
             print(f"ERROR: host file '{host_file_path}' not found.")
-            return False
+            return 1
         with open(host_file_path, "rb") as f:
             data = f.read()
 
@@ -867,12 +876,12 @@ class AddFileMixin:
         # limit on b-tree volumes is 32, not the flat catalog's 33.
         if not lisa_name:
             print("ERROR: the Lisa file name is empty.")
-            return False
+            return 1
         if len(lisa_name) > BTREE_MAX_NAME:
             print(
                 f"ERROR: Lisa file name '{lisa_name}' is {len(lisa_name)} chars; max is {BTREE_MAX_NAME} on a b-tree volume."
             )
-            return False
+            return 1
         # Lisa does not treat '/' as a folder delimiter in file names (real
         # volumes contain names like 'ALEX/ASM/APDM.TEXT'), so '/' is an
         # ordinary character and is allowed.
@@ -880,12 +889,12 @@ class AddFileMixin:
             name_bytes = lisa_name.encode("mac-roman")
         except UnicodeEncodeError as e:
             print(f"ERROR: cannot encode '{lisa_name}' as Mac Roman: {e}")
-            return False
+            return 1
         if len(name_bytes) > BTREE_MAX_NAME:
             print(
                 f"ERROR: '{lisa_name}' is {len(name_bytes)} Mac-Roman bytes; max is {BTREE_MAX_NAME} on a b-tree volume."
             )
-            return False
+            return 1
 
         # ---- ".TEXT" files (same as the flat path) ----
         is_text_file = lisa_name.upper().endswith(".TEXT")
@@ -919,12 +928,12 @@ class AddFileMixin:
             print(
                 f"ERROR: add on b-tree volumes currently supports only hintsize 1 (found {hintsize})."
             )
-            return False
+            return 1
         if not (0x80 <= smallmap_off <= 0x100):
             print(
                 f"ERROR: unexpected smallmap_offset 0x{smallmap_off:x}; cannot place the file map in hint page 0."
             )
-            return False
+            return 1
 
         num_data_pages = (filesize + 511) // 512
         needed_pages = hintsize + num_data_pages
@@ -938,7 +947,7 @@ class AddFileMixin:
                 break
         if new_sfile is None:
             print("ERROR: no free s-file slot available (slist is full).")
-            return False
+            return 1
 
         # ---- find free pages ----
         # The file needs `needed_pages` pages, and the catalog insert may
@@ -950,7 +959,7 @@ class AddFileMixin:
                 f"ERROR: not enough free space: need {needed_pages} file pages plus up to "
                 f"{2 * BTREE_NODE_BLKS} b-tree node pages but only {len(free_pages)} free."
             )
-            return False
+            return 1
         free_set = set(free_pages)
         hs = self._find_contiguous_run(free_set, hintsize)
         hint_pages = (
@@ -1009,7 +1018,7 @@ class AddFileMixin:
             print(
                 "ERROR: the file's data pages span more than 9 runs; the smallmap is full."
             )
-            return False
+            return 1
         struct.pack_into(">H", hp, smallmap_off + 6, len(runs))  # ecount
         for i, (st, cnt) in enumerate(runs):
             struct.pack_into(">I", hp, smallmap_off + 8 + i * 6, st)
@@ -1079,15 +1088,20 @@ class AddFileMixin:
         # flags = 0 (never opened by the OS), fileUnused = 0
         free_before = set(free_set)
         try:
-            ok, new_root = self._bt_insert(key, bytes(rec), free_set, modified)
+            ok, new_root, actual_depth = self._bt_insert(
+                key, bytes(rec), free_set, modified
+            )
         except RuntimeError as e:
             print(f"ERROR: {e}")
-            return False
+            return 1
         if not ok:
             print(
                 f"WARNING: a file named '{lisa_name}' already exists on this volume; not adding it."
             )
-            return "exists"
+            return 3
+        # the depth the tree has after this insert (measured from the real
+        # tree structure, not from the possibly-stale MDDF field)
+        new_depth = actual_depth + (1 if new_root is not None else 0)
         # the pages consumed from free_set are exactly the new node pages
         consumed = sorted(free_before - free_set)
         cset = set(consumed)
@@ -1113,9 +1127,15 @@ class AddFileMixin:
             )  # empty_file := new_sfile + 1
         if new_root is not None:
             struct.pack_into(">I", m, 0x12E, new_root)  # root_page := new root
-            struct.pack_into(
-                ">H", m, 0x132, self._mddf_u16(0x132) + 1
-            )  # tree_depth += 1
+        # Always write the measured tree depth back: this self-heals a stale
+        # MDDF tree_depth (e.g. left over from an interrupted write), which
+        # would otherwise make a later add/delete mix tree levels and corrupt
+        # the catalog.
+        if new_depth != self._mddf_u16(0x132):
+            print(
+                f"WARNING: MDDF tree_depth was {self._mddf_u16(0x132)} but the tree actually has depth {new_depth}; correcting the MDDF."
+            )
+        struct.pack_into(">H", m, 0x132, new_depth)  # tree_depth := measured depth
         self._mem_write_sector_data(mddf, bytes(m))
         modified.add(mddf)
 
@@ -1158,9 +1178,9 @@ class AddFileMixin:
             print(
                 f"  new root page (abs): {mddf + new_root}; tree depth increased to {self._mddf_u16(0x132)}"
             )
-        return True
+        return 0
 
-    def add_file(self, host_file_path: str, lisa_name: str) -> "bool | str":
+    def add_file(self, host_file_path: str, lisa_name: str) -> "int":
         """Add a host file into this flat-catalog (fs_version 14/15) volume as a new Lisa file.
 
         This replicates the OS's MAKE_ENTRY + NEW_SFILE + APPENDPAGES + write path
@@ -1181,8 +1201,8 @@ class AddFileMixin:
         header). `data` is then exactly the byte stream written to the file's
         data pages.
 
-        Returns True on success, the string "exists" if a file with the same
-        name is already on the volume, and False on any other failure.
+        Returns the exit code to use: 0 on success, 3 if a file with the
+        same name is already on the volume, and 1 on any other failure.
         """
         # ---- preconditions ----
         if not self.is_flat_catalog_volume():
@@ -1191,37 +1211,37 @@ class AddFileMixin:
             print(
                 f"ERROR: add supports flat-catalog (fs_version 14/15) and b-tree (fs_version 16/17) volumes; this volume is fs_version {self._fs_version}."
             )
-            return False
+            return 1
         if self._single_tag_size != 20:
             print("ERROR: add currently supports only 20-byte-tag (hard disk) images.")
-            return False
+            return 1
         if not os.path.isfile(host_file_path):
             print(f"ERROR: host file '{host_file_path}' not found.")
-            return False
+            return 1
         with open(host_file_path, "rb") as f:
             data = f.read()
 
         # ---- validate the Lisa file name ----
         if not lisa_name:
             print("ERROR: the Lisa file name is empty.")
-            return False
+            return 1
         if len(lisa_name) > 33:
             print(
                 f"ERROR: Lisa file name '{lisa_name}' is {len(lisa_name)} chars; max is 33."
             )
-            return False
+            return 1
         # Lisa does not treat '/' as a folder delimiter in file names, so
         # names containing '/' are allowed (same as on b-tree volumes).
         try:
             name_bytes = lisa_name.encode("mac-roman")
         except UnicodeEncodeError as e:
             print(f"ERROR: cannot encode '{lisa_name}' as Mac Roman: {e}")
-            return False
+            return 1
         if len(name_bytes) > 33:
             print(
                 f"ERROR: '{lisa_name}' is {len(name_bytes)} Mac-Roman bytes; max is 33."
             )
-            return False
+            return 1
 
         # ---- ".TEXT" files (name ends in ".TEXT", case-insensitive) ----
         # Build the complete on-disk byte stream in memory first (see
@@ -1265,7 +1285,7 @@ class AddFileMixin:
                 break
         if new_sfile is None:
             print("ERROR: no free s-file slot available (slist is full).")
-            return False
+            return 1
 
         # ---- find free pages (prefer contiguous runs, like sallocate) ----
         free_pages = self._bitmap_free_pages()
@@ -1273,7 +1293,7 @@ class AddFileMixin:
             print(
                 f"ERROR: not enough free space: need {needed_pages} pages ({hintsize} hint + {num_data_pages} data) but only {len(free_pages)} free."
             )
-            return False
+            return 1
         free_set = set(free_pages)
         hs = self._find_contiguous_run(free_set, hintsize)
         hint_pages = (
@@ -1304,12 +1324,12 @@ class AddFileMixin:
         slot = self._find_insert_slot(cat_data, lisa_name, rootmaxentries)
         if slot is None:
             print("ERROR: the rootcatalog is full; cannot add the file.")
-            return False
+            return 1
         if slot < 0:
             print(
                 f"WARNING: a file named '{lisa_name}' already exists on this volume; not adding it."
             )
-            return "exists"
+            return 3
 
         # ---- page-tag version/volume fields ----
         # Every page label (hint AND data) must carry the s-file's sentry version,
@@ -1362,7 +1382,7 @@ class AddFileMixin:
             print(
                 f"ERROR: map_offset ({map_offset}) is beyond hintsize ({hintsize}); cannot place the file map."
             )
-            return False
+            return 1
         # hentry on hint page 0; smallmap / file map on hint page `map_offset` (1 for fs 14/15).
         hint_page_data = {0: bytes(h), map_offset: bytes(sm)}
         for i, p in enumerate(hint_pages):
@@ -1478,7 +1498,7 @@ class AddFileMixin:
             print(f"Added '{lisa_name}' ({filesize} bytes) as s-file {new_sfile}.")
         print(f"  hint pages (abs): {[mddf + p for p in hint_pages]}")
         print(f"  data pages (abs): {[mddf + p for p in data_pages]}")
-        return True
+        return 0
 
 
 class ReplaceFileMixin(AddFileMixin):
@@ -1544,7 +1564,7 @@ class ReplaceFileMixin(AddFileMixin):
                     return idx
         return None
 
-    def replace_file(self, host_file_path: str, lisa_name: str) -> "bool | str":
+    def replace_file(self, host_file_path: str, lisa_name: str) -> "int":
         """Replace the contents of an EXISTING file on this volume with the
         contents of a host file, in place.
 
@@ -1574,8 +1594,8 @@ class ReplaceFileMixin(AddFileMixin):
         (case-insensitive) the host text is converted to the Lisa on-disk text
         layout first (1024-byte header page + CR-terminated text pages).
 
-        Returns True on success, the string "missing" if no file with that
-        name is on the volume, and False on any other failure.
+        Returns the exit code to use: 0 on success, 3 if no file with that
+        name is on the volume, and 1 on any other failure.
         """
         # ---- preconditions (same as add) ----
         is_btree = not self.is_flat_catalog_volume()
@@ -1583,15 +1603,15 @@ class ReplaceFileMixin(AddFileMixin):
             print(
                 f"ERROR: replace supports flat-catalog (fs_version 14/15) and b-tree (fs_version 16/17) volumes; this volume is fs_version {self._fs_version}."
             )
-            return False
+            return 1
         if self._single_tag_size != 20:
             print(
                 "ERROR: replace currently supports only 20-byte-tag (hard disk) images."
             )
-            return False
+            return 1
         if not os.path.isfile(host_file_path):
             print(f"ERROR: host file '{host_file_path}' not found.")
-            return False
+            return 1
         with open(host_file_path, "rb") as f:
             data = f.read()
 
@@ -1599,22 +1619,22 @@ class ReplaceFileMixin(AddFileMixin):
         max_name = BTREE_MAX_NAME if is_btree else 33
         if not lisa_name:
             print("ERROR: the Lisa file name is empty.")
-            return False
+            return 1
         if len(lisa_name) > max_name:
             print(
                 f"ERROR: Lisa file name '{lisa_name}' is {len(lisa_name)} chars; max is {max_name}."
             )
-            return False
+            return 1
         try:
             name_bytes = lisa_name.encode("mac-roman")
         except UnicodeEncodeError as e:
             print(f"ERROR: cannot encode '{lisa_name}' as Mac Roman: {e}")
-            return False
+            return 1
         if len(name_bytes) > max_name:
             print(
                 f"ERROR: '{lisa_name}' is {len(name_bytes)} Mac-Roman bytes; max is {max_name}."
             )
-            return False
+            return 1
 
         # ---- ".TEXT" files (same as add) ----
         is_text_file = lisa_name.upper().endswith(".TEXT")
@@ -1648,12 +1668,12 @@ class ReplaceFileMixin(AddFileMixin):
                 print(
                     f"ERROR: replace on b-tree volumes currently supports only hintsize 1 (found {hintsize})."
                 )
-                return False
+                return 1
             if not (0x80 <= smallmap_off <= 0x100):
                 print(
                     f"ERROR: unexpected smallmap_offset 0x{smallmap_off:x}; cannot update the file map in hint page 0."
                 )
-                return False
+                return 1
             file_matches = []
             dir_matches = 0
             for node, idx, rec in self._bt_scan_entries():
@@ -1672,7 +1692,7 @@ class ReplaceFileMixin(AddFileMixin):
                         f"ERROR: {len(file_matches)} files are named '{lisa_name}' on this volume (in "
                         "different directories); cannot tell which one to replace."
                     )
-                    return False
+                    return 1
                 leaf, idx, rec = file_matches[0]
                 sfile = struct.unpack(">H", rec[38:40])[0]
             elif dir_matches:
@@ -1680,12 +1700,12 @@ class ReplaceFileMixin(AddFileMixin):
                     f"ERROR: a catalog entry named '{lisa_name}' exists on this volume but it is a "
                     "directory, not a file; cannot replace it."
                 )
-                return False
+                return 1
             else:
                 print(
                     f"WARNING: no file named '{lisa_name}' on this volume; nothing to replace."
                 )
-                return "missing"
+                return 3
         else:
             rc_sfile = self._find_rootcatalog_sfile()
             rc = self._slist_entry(rc_sfile)
@@ -1693,7 +1713,7 @@ class ReplaceFileMixin(AddFileMixin):
                 print(
                     "ERROR: could not read the rootcatalog; the volume's metadata is inconsistent."
                 )
-                return False
+                return 1
             cat_chain = self._data_page_chain(rc[1])
             cat_data = b"".join(self.read_sector(mddf + p) for p in cat_chain)
             rootmaxentries = self._mddf_u16(0xC0)
@@ -1702,14 +1722,14 @@ class ReplaceFileMixin(AddFileMixin):
                 print(
                     f"WARNING: no file named '{lisa_name}' on this volume; nothing to replace."
                 )
-                return "missing"
+                return 3
             centry = cat_data[slot * 54 : slot * 54 + 54]
             if centry[34] != 3:  # cetype must be fileentry
                 print(
                     f"ERROR: a catalog entry named '{lisa_name}' exists on this volume but is not a "
                     f"regular file (cetype = {centry[34]}); cannot replace it."
                 )
-                return False
+                return 1
             sfile = struct.unpack(">H", centry[36:38])[0]
             leaf = idx = None  # no b-tree record to update on flat volumes
 
@@ -1719,18 +1739,18 @@ class ReplaceFileMixin(AddFileMixin):
             print(
                 f"ERROR: the slist has no entry for s-file {sfile}; the volume's metadata is inconsistent."
             )
-            return False
+            return 1
         old_hintaddr, old_fileaddr, old_filesize, sentry_version = sentry
         if old_hintaddr == 0:
             print(
                 f"ERROR: s-file {sfile} has no hint pages; the volume's metadata is inconsistent."
             )
-            return False
+            return 1
         try:
             old_chain = self._data_page_chain(old_fileaddr)
         except RuntimeError as e:
             print(f"ERROR: {e}")
-            return False
+            return 1
         old_num_pages = (old_filesize + 511) // 512
         if len(old_chain) != old_num_pages:
             print(
@@ -1753,7 +1773,7 @@ class ReplaceFileMixin(AddFileMixin):
                 print(
                     f"ERROR: not enough free space: need {need} more page(s) but only {len(free_set)} free."
                 )
-                return False
+                return 1
             ds = self._find_contiguous_run(free_set, need)
             new_pages = (
                 [ds + i for i in range(need)]
@@ -1795,7 +1815,7 @@ class ReplaceFileMixin(AddFileMixin):
                 print(
                     f"ERROR: map_offset ({map_offset}) is beyond hintsize ({hintsize}); cannot update the file map."
                 )
-                return False
+                return 1
             map_abs = mddf + old_hintaddr + map_offset
             sm_off = 0
         sm = bytearray(self.read_sector(map_abs))
@@ -1805,7 +1825,7 @@ class ReplaceFileMixin(AddFileMixin):
             print(
                 f"ERROR: the new file spans {len(runs)} run(s); the file map holds at most {maxent}."
             )
-            return False
+            return 1
         struct.pack_into(">I", sm, sm_off, num_new_pages)  # size = number of data pages
         struct.pack_into(">H", sm, sm_off + 4, maxent)  # max_entries: keep as found
         struct.pack_into(">H", sm, sm_off + 6, len(runs))  # ecount
@@ -1896,13 +1916,780 @@ class ReplaceFileMixin(AddFileMixin):
             f"freed {len(freed_pages)} page(s)."
         )
         print(f"  data pages (abs): {[mddf + p for p in data_pages]}")
-        return True
+        return 0
 
 
-class FileSystemWithAddFile(InMemoryFileSystem, ReplaceFileMixin):
-    """InMemoryFileSystem plus the add (add_file) and replace (replace_file) capabilities.
+class DeleteFileMixin(ReplaceFileMixin):
+    """The "delete" command: delete_file() and its private helpers.
 
-    ReplaceFileMixin already extends AddFileMixin, so both commands are available.
+    Inherits every AddFileMixin/ReplaceFileMixin helper and adds delete_file():
+    delete a regular file by name, exactly as the OS does on KILL (source-fsprim
+    KILL_ENTRY; source-sfileio1 kill_sfile; source-sfileio RELEASEPAGES;
+    source-fsdir Ddelete/RealDelete/DelAdjust for the b-tree catalog):
+
+      * the catalog entry is removed (flat: the 54-byte centry is cleared with
+        the removed/emptyentry bookkeeping of KILL_ENTRY; b-tree: the record is
+        deleted and the tree rebalanced by merge/rotate as in Ddelete);
+      * all of the file's data pages are freed in the allocation bitmap (their
+        contents and tags are left in place, exactly as the OS does);
+      * the hint pages are freed and their tags cleared (fileid 0, version 0,
+        dataok with 0 bytes used, relpage 0, fwd/bkwd END) as in RELEASEPAGES;
+      * the slist sentry is emptied (hintaddr/fileaddr/filesize 0, version+1);
+      * the MDDF is updated: filecount-1, freecount+freed pages, fs_overhead-4
+        per freed b-tree node, empty_file := min(empty_file, sfile), and the
+        b-tree root_page/tree_depth when the root changes.
+    """
+
+    def _hint_page_chain(self, hintaddr: int) -> List[int]:
+        """List of MDDF-relative hint-page numbers, following the tag fwdlinks
+        from hintaddr (END = 0xFFFFFF). The same walk RELEASEPAGES does for
+        leader pages."""
+        chain = []
+        rel = hintaddr
+        mddf = self._mddf_sector_number
+        while True:
+            chain.append(rel)
+            if len(chain) > self._num_sectors:
+                raise RuntimeError(
+                    f"the hint-page chain from page {hintaddr} is longer than the whole volume; "
+                    "the tag chain is corrupted (a loop?)"
+                )
+            tag = self.read_tags_for_sector(mddf + rel)
+            fwd = (tag[0x0E] << 16) | (tag[0x0F] << 8) | tag[0x10]
+            if fwd == 0xFFFFFF:
+                break
+            rel = fwd
+        return chain
+
+    def _file_map_page_set(
+        self, hint_pages: List[int], is_btree: bool, smallmap_off: int, map_offset: int
+    ):
+        """The set of MDDF-relative data pages listed in the file's map
+        (smallmap at smallmap_off in hint page 0 on b-tree volumes, map at
+        offset 0 of hint page map_offset on flat volumes), or None if the map
+        cannot be read."""
+        if not hint_pages:
+            return None
+        mddf = self._mddf_sector_number
+        if is_btree:
+            if not (0x80 <= smallmap_off <= 0x100):
+                return None
+            absn, off = mddf + hint_pages[0], smallmap_off
+        else:
+            if map_offset >= len(hint_pages):
+                return None
+            absn, off = mddf + hint_pages[map_offset], 0
+        sm = self.read_sector(absn)
+        if off + 8 > len(sm):
+            return None
+        size, maxent, ecount = struct.unpack(">IHH", sm[off : off + 8])
+        pages = set()
+        for i in range(min(ecount, maxent)):
+            if off + 8 + i * 6 + 6 > len(sm):
+                break
+            st, cnt = struct.unpack(">IH", sm[off + 8 + i * 6 : off + 14 + i * 6])
+            pages.update(range(st, st + cnt))
+        return pages
+
+    def _bt_search_to_leaf(self, key: bytes):
+        """Descend the b-tree root catalog to the leaf exactly as the OS Search
+        does (unlike _bt_search, which stops early when the key equals an
+        interior separator; Search always descends and reports the LEAF's
+        found flag). Returns (leaf, index, path, found) with path =
+        [(page, child_index), ...] from the root (depth 0) to the leaf.  The
+        descent follows the nodes' kind bytes, NOT the MDDF tree_depth field:
+        if that field is stale the real structure is still followed (and
+        len(path) is the true depth, which the caller writes back to the
+        MDDF)."""
+        page = self._mddf_u32(0x12E)
+        if page == BTREE_BAD:
+            raise RuntimeError("b-tree: volume has no root catalog (root_page = BAD)")
+        node = self._bt_read_node(page)
+        path = []
+        while True:
+            if len(path) > 64:  # sanity cap: a real tree is at most a few levels deep
+                raise RuntimeError(
+                    "b-tree: tree structure is inconsistent (no leaf reached)"
+                )
+            path.append((node.page, 0))
+            if node.kind == BTREE_LEAF:
+                # Leaf: SearchNode examines ALL records; found => index = i.
+                index = len(node.records)
+                found = False
+                for i, rec in enumerate(node.records):
+                    c = self._bt_key_cmp(rec[0:36], key)
+                    if c == 0:
+                        found = True
+                        index = i
+                        break
+                    if c > 0:
+                        index = i
+                        break
+                path[-1] = (node.page, index)
+                return node, index, path, found
+            # Interior: SearchNode examines records 1..nkeys-1 (record 0 holds
+            # the leftmost child and its key is the tree minimum, never
+            # compared). A match at record i descends via record i's own child
+            # (the key is the low key of that child's subtree); a miss at
+            # position p descends via child p.
+            index = None
+            for i in range(1, node.nkeys):
+                c = self._bt_key_cmp(node.records[i][4:40], key)
+                if c == 0:
+                    index = i
+                    break
+                if c > 0:  # key < record i's key
+                    index = i - 1
+                    break
+            if index is None:
+                index = node.nkeys - 1  # key is greater than every separator
+            path[-1] = (node.page, index)
+            node = self._bt_read_node(struct.unpack(">I", node.records[index][0:4])[0])
+
+    def _bt_delete_record(
+        self, leaf: _BTreeNode, leaf_idx: int, path: list, modified: set
+    ):
+        """Delete leaf.records[leaf_idx] from the b-tree root catalog, with the
+        OS's exact rebalancing (source-fsdir Ddelete + RealDelete +
+        DelAdjust): underflowed nodes merge with a sibling when the merge
+        fits, otherwise one record rotates; freed nodes are zeroed and their
+        pages deallocated (FreeNode); a shrunken root may lower the tree
+        depth.  `path` is the [(page, child_index), ...] descent from the root
+        (as returned by _bt_search_to_leaf).  All modified node pages are
+        written to the in-memory image (recorded in `modified`).
+
+        Returns (freed_node_pages, root_page, tree_depth): the MDDF-relative
+        pages of the freed nodes (4 pages each) and the (possibly new) MDDF
+        root_page/tree_depth values.  `tree_depth` is measured from the real
+        descent (len(path)), so a stale MDDF tree_depth is corrected by the
+        caller's write-back."""
+        mddf = self._mddf_sector_number
+        depth = len(path)  # the actual tree depth (the MDDF field may be stale)
+        root_page = self._mddf_u32(0x12E)
+        freed = []
+
+        def read(page):
+            return self._bt_read_node(page)
+
+        def write(node):
+            self._bt_write_node(node, modified)
+
+        def free_node(node):
+            # FreeNode: deallocate the node's pages and clear the node on disk
+            # "to make the Scavenger's job easier". The pages' tags are left
+            # stale, exactly as the OS does (deallocate touches only the
+            # bitmap; nothing clears the pagelabels of freed tree pages).
+            for i in range(BTREE_NODE_BLKS):
+                absn = mddf + node.page + i
+                self._mem_write_sector_data(absn, b"\x00" * SECTOR_SIZE_IN_BYTES)
+                modified.add(absn)
+            freed.append(node.page)
+
+        NOOP, ROTATE, MERGE, NDEL = range(4)
+
+        # ---- sibling selection (Ddelete) ----
+        # If the node is the last child of its parent, the OS uses the prior
+        # (left) sibling, else the next (right) one.
+        sibling = BTREE_BAD
+        right_page = BTREE_BAD
+        if depth > 1:
+            parent = read(path[depth - 2][0])
+            pidx = path[depth - 2][1]
+            if parent.nkeys > 1:
+                if pidx == parent.nkeys - 1:
+                    sibling = leaf.prior
+                    right_page = leaf.page
+                else:
+                    sibling = leaf.next
+                    right_page = sibling
+
+        # ---- RealDelete at the leaf level ----
+        leaf.records.pop(leaf_idx)
+        write(leaf)
+        half = (BTREE_NODE_SIZE - BTREE_NODEDESC_SIZE) // 2
+        if leaf.used + (leaf.nkeys + 1) * 2 < half and sibling != BTREE_BAD:
+            if leaf.next == sibling:
+                lft, rgt = leaf, read(sibling)  # sibling is the right node
+            else:
+                lft, rgt = read(sibling), leaf  # sibling is the left node
+            if (
+                lft.used + rgt.used + (lft.nkeys + rgt.nkeys + 1) * 2
+                <= BTREE_NODE_SIZE - BTREE_NODEDESC_SIZE
+            ):
+                # MergeNodes: right node's records go into the left node.
+                lft.records.extend(rgt.records)
+                lft.next = rgt.next
+                if rgt.next != BTREE_BAD:
+                    nn = read(rgt.next)  # patch backlink of new right sibling
+                    nn.prior = lft.page
+                    write(nn)
+                write(lft)
+                free_node(rgt)
+                state = MERGE
+                rotate_key = None
+            else:
+                # OneRotate: move one record across so the parent's separator
+                # can be re-keyed.
+                if lft is leaf:
+                    lft.records.append(rgt.records[0])  # rotate right to left
+                    rgt.records.pop(0)
+                else:
+                    rgt.records.insert(0, lft.records[-1])  # rotate left to right
+                    lft.records.pop()
+                write(lft)
+                write(rgt)
+                state = ROTATE
+                rotate_key = (
+                    rgt.records[0][0:36]
+                    if rgt.kind == BTREE_LEAF
+                    else rgt.records[0][4:40]
+                )
+        elif leaf.nkeys != 0:
+            state = NOOP  # underflow tolerated (no sibling) or none
+            rotate_key = None
+        elif leaf.page == root_page:
+            # The root leaf was emptied: the tree is empty.
+            state = NOOP
+            rotate_key = None
+            root_page = BTREE_BAD
+            depth = 0
+        else:
+            # An empty non-root node is removed and its neighbors relinked.
+            if leaf.prior != BTREE_BAD:
+                pn = read(leaf.prior)
+                pn.next = leaf.next
+                write(pn)
+            if leaf.next != BTREE_BAD:
+                nn = read(leaf.next)
+                nn.prior = leaf.prior
+                write(nn)
+            free_node(leaf)
+            state = NDEL
+            rotate_key = None
+
+        if state not in (MERGE, ROTATE, NDEL):
+            return freed, root_page, depth
+
+        # ---- DelAdjust: propagate the merge/rotate/delete upward ----
+        level = depth  # the level of the node that just changed (the leaf)
+        parent_page = path[level - 2][0]
+        pidx = path[level - 2][1]
+        sup = None  # a node that underflowed at the previous level
+        while True:
+            parent = read(parent_page)
+            if sup is not None:
+                # `sup` underflowed at the level below; `parent` is its parent.
+                if parent.nkeys == 1:
+                    if sup.nkeys != 0:
+                        # No siblings and the underflowed node is not empty:
+                        # the OS tolerates the underflow and stops.
+                        write(sup)
+                        return freed, root_page, depth
+                    # No siblings and the underflowed node is EMPTY: the whole
+                    # subtree under `parent` is empty. The OS frees `parent`
+                    # here and leaves the empty child dangling (a latent bug);
+                    # we do the same net effect without the dangling buffer:
+                    # free both nodes and delete `parent`'s record from its
+                    # own parent on the next pass. (Unreachable for real
+                    # catalogs, which always keep the root directory records.)
+                    free_node(sup)
+                    free_node(parent)
+                    state = NDEL
+                    sup = None
+                    if level == 2:
+                        # `parent` was the root: the tree is empty now.
+                        root_page = BTREE_BAD
+                        depth = 0
+                        return freed, root_page, depth
+                    level -= 1
+                    parent_page = path[level - 2][0]
+                    pidx = path[level - 2][1]
+                    continue
+                # Siblings exist: merge or rotate `sup` with its sibling.
+                if pidx == parent.nkeys - 1:
+                    sib_page = struct.unpack(">I", parent.records[pidx - 1][0:4])[0]
+                    lft, rgt = read(sib_page), sup  # sibling is the left node
+                else:
+                    sib_page = struct.unpack(">I", parent.records[pidx + 1][0:4])[0]
+                    lft, rgt = sup, read(sib_page)  # sibling is the right node
+                sibling = sib_page
+                right_page = rgt.page
+                if (
+                    lft.used + rgt.used + (lft.nkeys + rgt.nkeys + 1) * 2
+                    <= BTREE_NODE_SIZE - BTREE_NODEDESC_SIZE
+                ):
+                    lft.records.extend(rgt.records)
+                    # NOTE: the OS DelAdjust interior merge does NOT patch
+                    # prior/next links (only the RealDelete leaf-level merge
+                    # does). Interior nodes in real volumes carry stale or
+                    # garbage links (left over from when the node was created
+                    # as a leaf, or from AllocNode never initializing them),
+                    # and copying them - or patching the backlink of the node
+                    # they point at - can poison the leaf chain (a leaf's
+                    # prior/next can end up pointing at an interior node).
+                    write(lft)
+                    free_node(rgt)
+                    state = MERGE
+                    rotate_key = None
+                else:
+                    if lft is sup:
+                        lft.records.append(rgt.records[0])
+                        rgt.records.pop(0)
+                    else:
+                        rgt.records.insert(0, lft.records[-1])
+                        lft.records.pop()
+                    write(lft)
+                    write(rgt)
+                    state = ROTATE
+                    rotate_key = (
+                        rgt.records[0][0:36]
+                        if rgt.kind == BTREE_LEAF
+                        else rgt.records[0][4:40]
+                    )
+                sup = None
+                continue  # process `parent`'s own record next
+            # Normal step: adjust `parent`'s record for the state below.
+            if state != NDEL and sibling == right_page:
+                pidx += 1
+            if state == ROTATE:
+                # Copy the right node's new low key into the parent record
+                # (the child pointer is kept).
+                rec = bytearray(parent.records[pidx])
+                rec[4:40] = rotate_key
+                parent.records[pidx] = bytes(rec)
+                write(parent)
+                return freed, root_page, depth
+            # Merge or node deletion: drop the indexing record.
+            parent.records.pop(pidx)
+            if level == 2:
+                # The parent is the root: shrink it while it has a single key.
+                while parent.kind == BTREE_NONLEAF and parent.nkeys == 1:
+                    new_root = struct.unpack(">I", parent.records[0][0:4])[0]
+                    free_node(parent)
+                    depth -= 1
+                    root_page = new_root
+                    parent = read(new_root)
+                if parent.kind == BTREE_NONLEAF and parent.nkeys == 0:
+                    # Defensive: an emptied root (the OS would leave it
+                    # dangling; normalize to the clean empty-tree state that
+                    # RealDelete produces for an emptied leaf root).
+                    free_node(parent)
+                    depth = 0
+                    root_page = BTREE_BAD
+                else:
+                    write(parent)
+                return freed, root_page, depth
+            # DelAdjust: halfNode := ((NODE_SIZE - sizeof(NodeDesc)) div 2) -
+            # sizeof(integer); the parent does not underflow iff
+            # halfNode <= used + nkeys * sizeof(integer).
+            if (
+                BTREE_NODE_SIZE - BTREE_NODEDESC_SIZE
+            ) // 2 - 2 <= parent.used + parent.nkeys * 2:
+                write(parent)  # no underflow in the parent
+                return freed, root_page, depth
+            # Underflow: continue one level up.
+            level -= 1
+            sup = parent
+            parent_page = path[level - 2][0]
+            pidx = path[level - 2][1]
+
+    def delete_file(self, lisa_name: str) -> "int":
+        """Delete the file named lisa_name from this volume, as the OS does on
+        KILL (see the class docstring).
+
+        The file is located by name (case-insensitive): on b-tree volumes
+        every catalog record is scanned (fileentry records only), on
+        flat-catalog volumes the rootcatalog is probed with the same hash +
+        linear probing as the OS LOOKUP_BY_ENAME. Directories and other
+        non-file entries are refused.
+
+        Returns the exit code to use: 0 on success, 3 if no file with that
+        name is on the volume, and 1 on any other failure.
+        """
+        # ---- preconditions (same as add/replace) ----
+        is_btree = not self.is_flat_catalog_volume()
+        if self._fs_version not in (14, 15, 16, 17):
+            print(
+                f"ERROR: delete supports flat-catalog (fs_version 14/15) and b-tree (fs_version 16/17) volumes; this volume is fs_version {self._fs_version}."
+            )
+            return 1
+        if self._single_tag_size != 20:
+            print(
+                "ERROR: delete currently supports only 20-byte-tag (hard disk) images."
+            )
+            return 1
+        max_name = BTREE_MAX_NAME if is_btree else 33
+        if not lisa_name:
+            print("ERROR: the Lisa file name is empty.")
+            return 1
+        if len(lisa_name) > max_name:
+            print(
+                f"ERROR: Lisa file name '{lisa_name}' is {len(lisa_name)} chars; max is {max_name}."
+            )
+            return 1
+        try:
+            name_bytes = lisa_name.encode("mac-roman")
+        except UnicodeEncodeError as e:
+            print(f"ERROR: cannot encode '{lisa_name}' as Mac Roman: {e}")
+            return 1
+        if len(name_bytes) > max_name:
+            print(
+                f"ERROR: '{lisa_name}' is {len(name_bytes)} Mac-Roman bytes; max is {max_name}."
+            )
+            return 1
+
+        mddf = self._mddf_sector_number
+
+        # ---- MDDF fields ----
+        hintsize = self._mddf_u16(0xA2)
+        filecount = self._mddf_u16(0xB0)
+        freecount = self._mddf_u32(0xBA)
+        fs_overhead = self._mddf_u16(0x122)
+        empty_file = self._mddf_u16(0x9E)
+        bitmap_addr = self._mddf_u32(0x88)
+        bitmap_pages = self._mddf_u16(0x92)
+        slist_addr = self._mddf_u32(0x94)
+        slist_packing = self._mddf_u16(0x98)
+        smallmap_off = self._mddf_u16(0x114)  # b-tree: smallmap offset in hint page 0
+        map_offset = self._mddf_u16(0xAC)  # flat: hint-page index of the file map
+
+        modified = set()
+
+        # ---- locate the file (read-only, BEFORE writing anything) ----
+        leaf = None
+        leaf_idx = None
+        path = None
+        slot = None
+        if is_btree:
+            file_matches = []
+            dir_matches = 0
+            for node, idx, rec in self._bt_scan_entries():
+                name = (
+                    rec[3:35].split(b"\x00", 1)[0].decode("mac-roman", errors="replace")
+                )
+                if name.upper() != lisa_name.upper():
+                    continue
+                if rec[36] == 3:  # eType high byte = fileentry
+                    file_matches.append(rec)
+                else:
+                    dir_matches += 1  # a directory (threadentry/direntry) record
+            if file_matches:
+                if len(file_matches) > 1:
+                    print(
+                        f"ERROR: {len(file_matches)} files are named '{lisa_name}' on this volume (in "
+                        "different directories); cannot tell which one to delete."
+                    )
+                    return 1
+                key = file_matches[0][0:36]
+                sfile = struct.unpack(">H", file_matches[0][38:40])[0]
+                try:
+                    leaf, leaf_idx, path, found = self._bt_search_to_leaf(key)
+                except RuntimeError as e:
+                    print(f"ERROR: {e}")
+                    return 1
+                if not found:
+                    print(
+                        "ERROR: the catalog scan and the tree search disagree; the volume's metadata is inconsistent."
+                    )
+                    return 1
+            elif dir_matches:
+                print(
+                    f"ERROR: a catalog entry named '{lisa_name}' exists on this volume but it is a "
+                    "directory, not a file; it cannot be deleted by this command."
+                )
+                return 1
+            else:
+                print(
+                    f"WARNING: no file named '{lisa_name}' on this volume; nothing to delete."
+                )
+                return 3
+        else:
+            rc_sfile = self._find_rootcatalog_sfile()
+            rc = self._slist_entry(rc_sfile)
+            if rc is None or rc[1] == 0:
+                print(
+                    "ERROR: could not read the rootcatalog; the volume's metadata is inconsistent."
+                )
+                return 1
+            cat_chain = self._data_page_chain(rc[1])
+            cat_data = b"".join(self.read_sector(mddf + p) for p in cat_chain)
+            rootmaxentries = self._mddf_u16(0xC0)
+            slot = self._find_flat_file_slot(cat_data, lisa_name, rootmaxentries)
+            if slot is None:
+                print(
+                    f"WARNING: no file named '{lisa_name}' on this volume; nothing to delete."
+                )
+                return 3
+            centry = cat_data[slot * 54 : slot * 54 + 54]
+            if centry[34] != 3:  # cetype must be fileentry
+                print(
+                    f"ERROR: a catalog entry named '{lisa_name}' exists on this volume but is not a "
+                    f"regular file (cetype = {centry[34]}); it cannot be deleted by this command."
+                )
+                return 1
+            sfile = struct.unpack(">H", centry[36:38])[0]
+
+        # ---- the file's current layout (read-only) ----
+        sentry = self._slist_entry(sfile)
+        if sentry is None:
+            print(
+                f"ERROR: the slist has no entry for s-file {sfile}; the volume's metadata is inconsistent."
+            )
+            return 1
+        hintaddr, fileaddr, filesize, sentry_version = sentry
+        # kill_sfile: if (ecode > 0) or (s_addr.hintaddr <= 0) then E2_SENTRY_BAD
+        # (0 = empty, negative = locked/retired; in 32-bit two's complement,
+        # <= 0 means 0x80000000 and up, which includes BAD = 0xFFFFFFFF)
+        if hintaddr == 0 or hintaddr >= 0x80000000:
+            print(
+                f"ERROR: s-file {sfile} has no hint pages; the volume's metadata is inconsistent."
+            )
+            return 1
+
+        # ---- hint pages: the tag chain from hintaddr (RELEASEPAGES' list) ----
+        try:
+            hint_pages = self._hint_page_chain(hintaddr)
+        except RuntimeError as e:
+            print(f"ERROR: {e}")
+            return 1
+        if len(hint_pages) != hintsize:
+            print(
+                f"NOTE: the hint chain of '{lisa_name}' has {len(hint_pages)} page(s) but the MDDF says "
+                f"hintsize {hintsize}; using the chain."
+            )
+
+        # ---- data pages: the tag chain from fileaddr ----
+        # (the OS frees data pages without touching their contents or tags)
+        try:
+            data_pages = self._data_page_chain(fileaddr) if fileaddr else []
+        except RuntimeError as e:
+            print(f"ERROR: {e}")
+            return 1
+        expected = (filesize + 511) // 512
+        if len(data_pages) != expected:
+            print(
+                f"NOTE: the tag chain of '{lisa_name}' has {len(data_pages)} page(s) but the sentry says "
+                f"{filesize} bytes ({expected} page(s)); using the chain."
+            )
+        # cross-check against the file map, like replace does
+        map_pages = self._file_map_page_set(
+            hint_pages, is_btree, smallmap_off, map_offset
+        )
+        if map_pages is not None and set(data_pages) != map_pages:
+            print(
+                f"NOTE: the file map of '{lisa_name}' lists {len(map_pages)} page(s) but the tag chain has "
+                f"{len(data_pages)}; freeing the chain's pages."
+            )
+        # a corrupted chain may repeat pages; free each page once
+        seen = set()
+        uniq = []
+        for p in data_pages + hint_pages:
+            if p not in seen:
+                seen.add(p)
+                uniq.append(p)
+        if len(uniq) != len(data_pages) + len(hint_pages):
+            print(
+                "NOTE: the tag chains contain duplicate pages; each page is freed only once."
+            )
+        data_pages = [p for p in uniq if p in set(data_pages)]
+        hint_pages = [p for p in uniq if p in set(hint_pages)]
+
+        # ---- b-tree catalog: delete the record and rebalance (source-fsdir) ----
+        freed_nodes = []
+        new_root = None
+        new_depth = None
+        if is_btree:
+            freed_nodes, new_root, new_depth = self._bt_delete_record(
+                leaf, leaf_idx, path, modified
+            )
+        else:
+            # ---- flat catalog: clear the centry (KILL_ENTRY) ----
+            # cetype := removed, unless the entry following on the SAME page is
+            # empty and this is not the last entry in the catalog: then
+            # cetype := emptyentry (shortens probe chains). The name, sfile
+            # and the read/write location fields are cleared.
+            slot_off = slot * 54
+            cpage_idx = slot_off // 512
+            cbyte = slot_off % 512
+            cetype = 7  # removed
+            if (
+                cbyte + 108 <= 512 and slot_off < rc[2] - 54
+            ):  # next fits on page; not last
+                next_centry = cat_data[(slot + 1) * 54 : (slot + 1) * 54 + 35]
+                if len(next_centry) >= 35 and next_centry[34] == 0:  # emptyentry
+                    cetype = 0
+            c = bytearray(54)
+            c[34] = cetype
+            if cbyte + 54 <= 512:
+                cp = bytearray(self.read_sector(mddf + cat_chain[cpage_idx]))
+                cp[cbyte : cbyte + 54] = c
+                self._mem_write_sector_data(mddf + cat_chain[cpage_idx], bytes(cp))
+                modified.add(mddf + cat_chain[cpage_idx])
+            else:
+                # The entry straddles two catalog pages; split the write.
+                n1 = 512 - cbyte
+                cp = bytearray(self.read_sector(mddf + cat_chain[cpage_idx]))
+                cp[cbyte:512] = c[:n1]
+                self._mem_write_sector_data(mddf + cat_chain[cpage_idx], bytes(cp))
+                modified.add(mddf + cat_chain[cpage_idx])
+                cp = bytearray(self.read_sector(mddf + cat_chain[cpage_idx + 1]))
+                cp[0 : 54 - n1] = c[n1:]
+                self._mem_write_sector_data(mddf + cat_chain[cpage_idx + 1], bytes(cp))
+                modified.add(mddf + cat_chain[cpage_idx + 1])
+
+        # ---- hint pages: clear the tags (RELEASEPAGES, fnum < 0) ----
+        # The page DATA is left in place (the OS notes "could clear the data
+        # part of the page here, if desired" and doesn't); only the pagelabel
+        # is reset: fileid 0, version 0, dataok with 0 bytes used, relpage 0,
+        # fwd/bkwd END. volume and abspage are untouched.
+        for p in hint_pages:
+            absn = mddf + p
+            t = bytearray(self.read_tags_for_sector(absn))
+            t[0:2] = b"\x00\x00"  # version := 0
+            t[4:6] = b"\x00\x00"  # fileid := 0
+            t[6:8] = b"\x80\x00"  # datastat := dataok, dataused := 0
+            t[12:14] = b"\x00\x00"  # relpage := 0
+            t[14:17] = b"\xff\xff\xff"  # fwdlink := END
+            t[17:20] = b"\xff\xff\xff"  # bkwdlink := END
+            self._mem_write_sector_tag(absn, bytes(t))
+            modified.add(absn)
+
+        # ---- file map: truncate the first map section (FMAP_MGR FMRELEASE) ----
+        # When the file's data pages are released, the OS writes the first map
+        # section back with size := 0, ecount := 0 and the released entries
+        # cleared (address := 0, cpages := 0). Later map sections (large files)
+        # are left in place; their pages are released with the hint pages and
+        # their tags are cleared above, exactly as in the OS.
+        if data_pages:
+            if is_btree:
+                map_abs, map_off = (
+                    (mddf + hint_pages[0], smallmap_off)
+                    if hint_pages and 0x80 <= smallmap_off <= 0x100
+                    else (None, 0)
+                )
+            else:
+                map_abs, map_off = (
+                    (mddf + hint_pages[map_offset], 0)
+                    if map_offset < len(hint_pages)
+                    else (None, 0)
+                )
+            if map_abs is not None:
+                ms = bytearray(self.read_sector(map_abs))
+                if map_off + 8 <= len(ms):
+                    msize, mmaxent, mecount = struct.unpack(
+                        ">IHH", ms[map_off : map_off + 8]
+                    )
+                    if msize > 0:
+                        struct.pack_into(">I", ms, map_off, 0)  # size := 0
+                        struct.pack_into(">H", ms, map_off + 6, 0)  # ecount := 0
+                        nent = min(mmaxent, (len(ms) - map_off - 8) // 6)
+                        for i in range(nent):
+                            ms[map_off + 8 + i * 6 : map_off + 14 + i * 6] = b"\x00" * 6
+                        self._mem_write_sector_data(map_abs, bytes(ms))
+                        modified.add(map_abs)
+
+        # ---- slist sentry: empty it (kill_sfile) ----
+        spage = sfile // slist_packing
+        soffs = (sfile % slist_packing) * 14
+        slist_abs = mddf + slist_addr + spage
+        sl = bytearray(self.read_sector(slist_abs))
+        struct.pack_into(">I", sl, soffs, 0)  # hintaddr := 0
+        struct.pack_into(">I", sl, soffs + 4, 0)  # fileaddr := 0
+        struct.pack_into(">I", sl, soffs + 8, 0)  # filesize := 0
+        new_version = (sentry_version + 1) & 0xFFFF
+        struct.pack_into(">H", sl, soffs + 12, new_version)  # version := version + 1
+        if (
+            new_version == 0x7FFF
+        ):  # if version = maxint then hintaddr := -1 (retire the slot)
+            struct.pack_into(">I", sl, soffs, 0xFFFFFFFF)
+        self._mem_write_sector_data(slist_abs, bytes(sl))
+        modified.add(slist_abs)
+
+        # ---- MDDF: filecount, freecount, fs_overhead, empty_file, root/depth ----
+        # A page that somehow appears in both tag chains is freed once.
+        freed_total = len(set(data_pages) | set(hint_pages)) + BTREE_NODE_BLKS * len(
+            freed_nodes
+        )
+        m = bytearray(self.read_sector(mddf))
+        struct.pack_into(
+            ">H", m, 0xB0, (filecount - 1) & 0xFFFF
+        )  # filecount := filecount - 1
+        struct.pack_into(
+            ">I", m, 0xBA, (freecount + freed_total) & 0xFFFFFFFF
+        )  # freecount += freed
+        if is_btree:
+            if freed_nodes:
+                struct.pack_into(
+                    ">H",
+                    m,
+                    0x122,
+                    (fs_overhead - BTREE_NODE_BLKS * len(freed_nodes)) & 0xFFFF,
+                )
+            if new_root != self._mddf_u32(0x12E) or new_depth != self._mddf_u16(0x132):
+                if new_depth != self._mddf_u16(0x132):
+                    print(
+                        f"WARNING: MDDF tree_depth was {self._mddf_u16(0x132)} but the tree actually has depth {new_depth}; correcting the MDDF."
+                    )
+                struct.pack_into(">I", m, 0x12E, new_root)  # root_page
+                struct.pack_into(">H", m, 0x132, new_depth)  # tree_depth
+        if sfile < empty_file:
+            struct.pack_into(
+                ">H", m, 0x9E, sfile
+            )  # empty_file := min(empty_file, sfile)
+        self._mem_write_sector_data(mddf, bytes(m))
+        modified.add(mddf)
+
+        # ---- allocation bitmap: clear the freed pages ----
+        all_freed = set(data_pages) | set(hint_pages)
+        for p in freed_nodes:
+            all_freed.update(p + i for i in range(BTREE_NODE_BLKS))
+        for i in range(bitmap_pages):
+            bb = bytearray(self.read_sector(mddf + bitmap_addr + i))
+            changed = False
+            for p in all_freed:
+                if p // 4096 == i:
+                    bit = p % 4096
+                    if (bb[bit // 8] >> (bit % 8)) & 1:
+                        bb[bit // 8] &= ~(1 << (bit % 8))
+                        changed = True
+            if changed:
+                self._mem_write_sector_data(mddf + bitmap_addr + i, bytes(bb))
+                modified.add(mddf + bitmap_addr + i)
+
+        # ---- flush modified sectors to disk, patching tag checksums in one pass ----
+        with open(self._file_name, "r+b") as fw:
+            for sn in sorted(modified):
+                d = self.read_sector(sn)
+                tg = self.read_tags_for_sector(sn)
+                ck = self.calculate_new_tag_checksum(sn)
+                tg = tg[:11] + bytes([ck]) + tg[12:]
+                self._file.seek(self._sector_tag_file_offset(sn) + 11)
+                self._file.write(bytes([ck]))  # keep the in-memory copy in sync
+                fw.seek(self._sector_data_file_offset(sn))
+                fw.write(d)
+                fw.seek(self._sector_tag_file_offset(sn))
+                fw.write(tg)
+
+        self.fix_dc42_checksum(confirm=False)
+
+        print(
+            f"Deleted '{lisa_name}' (s-file {sfile}): {filesize} byte(s); freed {len(data_pages)} data "
+            f"page(s) and {len(hint_pages)} hint page(s)."
+        )
+        if freed_nodes:
+            print(
+                f"  freed {len(freed_nodes)} b-tree catalog node(s) ({BTREE_NODE_BLKS} page(s) each); "
+                f"the tree depth is now {new_depth}."
+            )
+        return 0
+
+
+class FileSystemWithAddFile(InMemoryFileSystem, DeleteFileMixin):
+    """InMemoryFileSystem plus the add (add_file), replace (replace_file) and
+    delete (delete_file) capabilities.
+
+    DeleteFileMixin already extends ReplaceFileMixin (which extends
+    AddFileMixin), so all three commands are available.
     """
 
     pass
@@ -1912,29 +2699,38 @@ class FileSystemWithAddFile(InMemoryFileSystem, ReplaceFileMixin):
 if __name__ == "__main__":
     command = sys.argv[1].strip().lower() if len(sys.argv) >= 2 else ""
 
-    if command not in ("add", "replace"):
+    if command not in ("add", "replace", "delete"):
         print(
-            "Usage: python LisaFileSystemToolPerFile.py <command> <disk image file name> <host file> <lisa file name>"
+            "Usage: python LisaFileSystemToolPerFile.py <command> <disk image file name> [host file] <lisa file name>"
         )
-        print("       <command> is 'add' or 'replace'.")
+        print("       <command> is 'add', 'replace', or 'delete'.")
         print(
-            "This tool implements the 'add' and 'replace' commands; use LisaFileSystemTool.py for the other commands."
+            "This tool implements the 'add', 'replace', and 'delete' commands; use LisaFileSystemTool.py for the other commands."
         )
         print(
             "Exit codes: 0 = success; 3 = add: a file with that name already exists (nothing was added) / "
-            "replace: no file with that name exists on the volume (nothing was changed); 1 = any other failure."
+            "replace or delete: no file with that name exists on the volume (nothing was changed); "
+            "1 = any other failure."
         )
         sys.exit(1)
 
-    if len(sys.argv) != 5:
-        print(
-            f"Usage: python LisaFileSystemToolPerFile.py {command} <disk image file name> <host file> <lisa file name>"
-        )
-        sys.exit(1)
-
-    disk_image_file_name = sys.argv[2]
-    host_file_name = sys.argv[3]
-    lisa_os_file_name = sys.argv[4]
+    if command == "delete":
+        if len(sys.argv) != 4:
+            print(
+                "Usage: python LisaFileSystemToolPerFile.py delete <disk image file name> <lisa file name>"
+            )
+            sys.exit(1)
+        disk_image_file_name = sys.argv[2]
+        lisa_os_file_name = sys.argv[3]
+    else:
+        if len(sys.argv) != 5:
+            print(
+                f"Usage: python LisaFileSystemToolPerFile.py {command} <disk image file name> <host file> <lisa file name>"
+            )
+            sys.exit(1)
+        disk_image_file_name = sys.argv[2]
+        host_file_name = sys.argv[3]
+        lisa_os_file_name = sys.argv[4]
 
     # The top level is the right place to turn a failed construction (FileNotFoundError,
     # ValueError, ...) into a one-line error message and a non-zero exit status.
@@ -1953,17 +2749,16 @@ if __name__ == "__main__":
         )
         sys.exit(1)
 
+    # Every command method returns the exit code to use directly:
+    # 0 = success, 3 = no action was needed (add: a file with that name
+    # already exists / replace and delete: no file with that name on the
+    # volume — so callers re-running an upload list can count "no action
+    # needed" separately from success and from a real failure),
+    # 1 = any other failure.
     if command == "add":
-        result = file_system.add_file(host_file_name, lisa_os_file_name)
-        no_action = "exists"
+        sys.exit(file_system.add_file(host_file_name, lisa_os_file_name))
+    elif command == "replace":
+        sys.exit(file_system.replace_file(host_file_name, lisa_os_file_name))
     else:
-        result = file_system.replace_file(host_file_name, lisa_os_file_name)
-        no_action = "missing"
-    if result == no_action:
-        # A distinct exit code (3) so that callers re-running an upload list
-        # (upload_files.sh) can count "no action needed" separately from
-        # success (exit 0) and from a real failure (exit 1).
-        sys.exit(3)
-    if result is not True:
-        sys.exit(1)
+        sys.exit(file_system.delete_file(lisa_os_file_name))
     # That's all, Folks!
