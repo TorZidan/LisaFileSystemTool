@@ -1,0 +1,45 @@
+The definition of a text tile (from
+https://www.bitsavers.org/pdf/apple/lisa/toolkit_3.0/Package_2_Examples/17_Lisa_Development_System_Internals_Documentation_Feb84.pdf,
+pages 37 and 38):
+
+• Each text page (i.e., those following the header page) contains some number of complete lines of
+text and is filled with null characters (ASCII 0) after the last line.
+
+The Pascal run-time system should ensure that all text files end with a CR when CLOSE, in
+particular, dealing with the case where the last action before the CLOSE was a WRITE instead of a
+WRITELN. Similarly, the run-time system should also ensure that pages terminate with CRs even if
+inordinately long lines are written by a series of WRITEs without any WRITELNs. (However,
+determining when to insert a CR can be a tricky issue.) (For more on related issues, see the
+following two points.)
+
+• The end of a text page must terminate with at least one null. For simplicity, the first instance
+of a CR-null sequence will signal the end of the page.
+
+As a consequence of this simplifying assumption, a WRITELN followed by a WRITE (CHR(0)) will
+inadvertently terminate the current page, but anyone writing nulls to a text file is living in a
+state of sin and deserves what they get.
+
+To be on the safe side, when dealing with text files at the BLOCKREAD level, should not assume that
+a final CR-null always exists, making sure not to run off the end of page buffers. Our tools should
+not blow up on invalid input.
+
+• A line is a sequence of zero or more characters followed by a CR. A line may be “arbitrarily long”
+(1023 bytes long, counting the CR, with room for a terminating null at the end of the page) but
+programs (such as development system tools) may choose to consider as significant only the first N
+characters (where N is a reasonable and well documented number, i.e., either 132 or 255).
+
+The Pascal run-time system should allow the reading and writing of arbitrarily long lines. The
+contents of a long line should be obtainable via a series of READs. The action of READLN should be
+to read past the next CR, returning an IORESULT warning value if characters are skipped in the
+process.
+
+Support of “arbitrarily long” lines should not be viewed as a threat to tool implementors. Tools may
+have reasonable restrictions on what text files they choose to accept, as long as they don't blow up
+on other text files. Tools may choose to ignore the excess or unreasonably long lines, give a
+warning, or signal an error and abort processing.
+
+• A sequence of spaces at the beginning of a line may be compressed into a two-byte code, namely a
+DLE character (ASCII 16) followed by a byte containing 32 plus the number of spaces represented.
+
+• A null text file (i.e., one which has no contents — as might be created by opening a file and then
+closing it before anything is written to it) consists of only the 1024-byte header page.

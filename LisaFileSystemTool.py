@@ -1388,10 +1388,31 @@ class InMemoryFileSystem:
             bitmap_sector_bytes = self.read_sector(sector)
             print_bytes_in_hex_and_ascii(bitmap_sector_bytes)
 
-    def dump_files(self):
+    def _dump_destination(self, file_name: str, flatten: bool = False):
+        """Compute the host file path a Lisa file is dumped to under /tmp/dc42-dump.
+
+        By default a '/' in the Lisa file name becomes a host folder separator: a
+        file named 'apbg/BG1A.TEXT' is written into the apbg/ subfolder of the dump
+        folder. With flatten=True the '/' is replaced with '-' instead ('apbg-BG1A.TEXT'),
+        so every file is written directly into the dump folder itself.
+
+        Returns the full output path, or None if the (possibly flattened) name would
+        escape the dump folder (a leading '/' or a '..' component) and must be skipped.
+        """
+        output_root = "/tmp/dc42-dump"
+        host_name = file_name.replace("/", "-") if flatten else file_name
+        output_filename = os.path.normpath(os.path.join(output_root, host_name))
+        if not output_filename.startswith(output_root + os.sep):
+            return None
+        return output_filename
+
+    def dump_files(self, flatten: bool = False):
         """
         Dumps all files from the dc42 image to the host file system, into folder /tmp/dc42_dump (it creates the folder if not present).
-        Prserves the directory structure. Does not attempt to rename the files in any way.
+        By default it preserves the directory structure: a '/' in a Lisa file name
+        becomes a subfolder. With flatten=True, a '/' is replaced with '-' instead, so
+        all files are dumped into the single /tmp/dc42-dump folder (the 'dump-flatten'
+        command). Does not attempt to rename the files in any other way.
 
         How it works:
         Read each s-record sector (each such sector contains 36 s-records, one per file).
@@ -1412,7 +1433,7 @@ class InMemoryFileSystem:
         """
         if self.is_flat_catalog_volume():
             # fs_version 14/15 volumes: there is no B-tree catalog, so use the slist + tag chains instead:
-            self._dump_files_flat_catalog()
+            self._dump_files_flat_catalog(flatten)
             return
         mddf_sector_bytes = self._mddf_sector_bytes
         s_records_start_sector_offset_after_mddf = to_uint32_big_endian(
@@ -1497,13 +1518,12 @@ class InMemoryFileSystem:
                     )
                     continue
 
-                output_filename = os.path.normpath("/tmp/dc42-dump/" + file_name)
                 # Lisa does not treat '/' as a folder delimiter in file names, but
-                # when saving to the host file system we use it as one: a file
-                # named 'apbg/BG1A.TEXT' is written into the apbg/ subfolder of
-                # the dump folder. Skip any name that would otherwise escape the
-                # dump folder (a leading '/' or '..' components).
-                if not output_filename.startswith("/tmp/dc42-dump" + os.sep):
+                # when saving to the host file system we use it as one (or replace it
+                # with '-' in flatten mode). Skip any name that would otherwise escape
+                # the dump folder (a leading '/' or '..' components).
+                output_filename = self._dump_destination(file_name, flatten)
+                if output_filename is None:
                     print(
                         f"Skipping file with an unsafe file name {file_name!r}: s_record_index={s_record_index}"
                     )
@@ -1575,7 +1595,7 @@ class InMemoryFileSystem:
                         # to the file size before converting (the header page is
                         # stripped by lisa_text_file_to_host_text()):
                         if file_size < len(raw_text_file_bytes):
-                            del raw_text_file_bytes[file_size :]
+                            del raw_text_file_bytes[file_size:]
                         output_file_handler.write(
                             lisa_text_file_to_host_text(bytes(raw_text_file_bytes))
                         )
@@ -1807,6 +1827,7 @@ class InMemoryFileSystem:
             return
 
         # Step 2: walk the chain of leaf nodes, dumping all records
+        file_rows: list = []  # rows for the file table printed at the end
         num_files_found = 0
         num_directories_found = 0
         num_threads_found = 0
@@ -1847,7 +1868,9 @@ class InMemoryFileSystem:
                     )
                     continue
                 record_bytes = node_bytes[record_start:record_end]
-                entry_category = self.print_catalog_record(record_bytes, i + 1)
+                entry_category = self.print_catalog_record(
+                    record_bytes, i + 1, file_rows
+                )
                 if entry_category == "file":
                     num_files_found += 1
                 elif entry_category == "directory":
@@ -1864,6 +1887,12 @@ class InMemoryFileSystem:
                 break
             current_page = next_page
 
+        if file_rows:
+            print()
+            for line in format_table(
+                ["s_file_id", "file_name", "file_size", "physical_size"], file_rows
+            ):
+                print(line)
         print(
             f"################# Found {num_files_found} files, {num_directories_found} directories, {num_threads_found} thread entries and {num_other_found} other catalog entries. ##############"
         )
@@ -2061,11 +2090,17 @@ class InMemoryFileSystem:
                 data_start_sector_number = None
         return hint_sector_number, data_start_sector_number
 
-    def print_catalog_record(self, record: bytes, entry_number: int) -> str:
+    def print_catalog_record(
+        self, record: bytes, entry_number: int, rows: list | None = None
+    ) -> str:
         """
         Print one catalog record found in a leaf node.
 
         Returns a category string: 'file', 'directory', 'thread' or 'other'.
+
+        If rows is not None, file entries are not printed verbosely; instead their
+        [s_file_id, file_name, file_size, physical_size] row is appended to rows
+        (table mode, used by the 'list' command).
 
         All records start with a 36-byte key (see MakeKey in LISA_OS/OS/source-fsasm.text.unix.txt):
             [0x24][parent ID (2 bytes, big-endian)][name (up to 32 bytes, zero padded)][0x00]
@@ -2120,6 +2155,14 @@ class InMemoryFileSystem:
             file_unused = to_uint32_big_endian(
                 record, 60
             )  # reserved for future use; printed for completeness
+            if rows is not None:
+                # Table mode (the 'list' command): collect this file's row for the
+                # table printed by dump_catalog(); skip the verbose per-entry output
+                # (and the s_entry lookup it needs).
+                rows.append(
+                    [str(s_file_id), key_name, str(file_size), str(physical_size)]
+                )
+                return "file"
             hint_sector_number, data_start_sector_number = self.get_sentry_for_sfile(
                 s_file_id
             )
@@ -2478,6 +2521,7 @@ class InMemoryFileSystem:
             f"Note: MDDF says filecount={to_uint16_big_endian(self._mddf_sector_bytes, 176)}, empty_file={to_uint16_big_endian(self._mddf_sector_bytes, 158)}, maxfiles={to_uint16_big_endian(self._mddf_sector_bytes, 160)}."
         )
         num_files = 0
+        rows: list[list[str]] = []
         for s_file_id in range(first_sfile, last_sfile + 1):
             entry = self._slist_entry(s_file_id)
             if entry is None:
@@ -2498,38 +2542,17 @@ class InMemoryFileSystem:
                 continue  # no valid hint page exists for this sfile
             hint_sector_bytes = self.read_sector(hint_sector_number)
             file_name = pascal_to_string(hint_sector_bytes, start=0)
-            ftype = hint_sector_bytes[0x2C]
-            dtc = to_uint32_big_endian(hint_sector_bytes, 0x2E)
-            dta = to_uint32_big_endian(hint_sector_bytes, 0x32)
-            dtm = to_uint32_big_endian(hint_sector_bytes, 0x36)
-            machine_id = to_uint32_big_endian(
-                hint_sector_bytes, 0x42
-            )  # (the machine this file may be opened on, if the file is protected)
-
-            # Per LISA_OS/OS/source-SERNUM.TEXT.unix.txt: machine_id = first3 * 65536 + last5, where
-            # first3/last5 are the BCD digits of the 8-digit AppleNet serial number.
-            applenet_id = (
-                f" = AppleNet '{machine_id // 65536:03d}{machine_id % 65536:05d}'"
-            )
-
-            is_protected = bool(hint_sector_bytes[0x48])
-            data_start_str = (
-                f"data_start_sector={self._mddf_sector_number + fileaddr}"
-                if fileaddr != 0
-                else "no data (empty file)"
-            )
-            created_str = format_date(dtc) if dtc != 0 else "never"
-            modified_str = format_date(dtm) if dtm != 0 else "never"
-            print(
-                f"s_file_id={s_file_id},  name='{file_name}': ftype={FILETYPE_NAMES.get(ftype, f'unknown {ftype}')} ({ftype}), size={filesize} bytes, "
-                f"hint_sector_number={hint_sector_number}, {data_start_str}; "
-                f"created='{created_str}', modified='{modified_str}'; machine_id={machine_id}"
-                + (
-                    f"; PROTECTED to run only on machine_id: {machine_id} ({machine_id:#010x}){applenet_id}"
-                    if is_protected
-                    else ""
-                )
-            )
+            # The flat catalog stores no physical size of its own; derive it the same
+            # way the B-tree catalog's physSize field is defined: the file size rounded
+            # up to the next 512 bytes.
+            physical_size = (filesize + 511) // 512 * 512
+            rows.append([str(s_file_id), file_name, str(filesize), str(physical_size)])
+        if rows:
+            print()
+            for line in format_table(
+                ["s_file_id", "file_name", "file_size", "physical_size"], rows
+            ):
+                print(line)
         print(f"Found {num_files} file(s) in the slist.")
 
     def flat_catalog_dump_catalog(self):
@@ -2662,10 +2685,12 @@ class InMemoryFileSystem:
         )
         return protected_hint_sector_numbers
 
-    def _dump_files_flat_catalog(self):
+    def _dump_files_flat_catalog(self, flatten: bool = False):
         """fs_version 14/15 variant of dump_files(): write the contents of every file in the
         slist to /tmp/dc42-dump/, following each file's tag chain (see
         flat_catalog_read_file_data()). The rootcatalog itself is not dumped as a file.
+        By default a '/' in a file name becomes a subfolder; with flatten=True it is
+        replaced with '-' (see dump_files() and _dump_destination()).
         Like dump_files() above, ".TEXT" files are dumped as plain host text:
         the 1024-byte header page and the null page padding are stripped, and
         the CR line endings are converted to host "\n" (see
@@ -2730,10 +2755,10 @@ class InMemoryFileSystem:
             # padding, and convert the Lisa CR line endings to host "\n".
             if file_name.upper().endswith(".TEXT"):
                 file_data = lisa_text_file_to_host_text(file_data)
-            output_filename = os.path.normpath(os.path.join(output_dir, file_name))
             # Skip any name that would escape the dump folder (a leading '/' or
-            # '..' components).
-            if not output_filename.startswith(output_dir + os.sep):
+            # '..' components); in flatten mode a '/' in the name becomes a '-'.
+            output_filename = self._dump_destination(file_name, flatten)
+            if output_filename is None:
                 print(
                     f"Skipping file with an unsafe file name {file_name!r}: s_file_id={s_file_id}"
                 )
@@ -2811,6 +2836,65 @@ def pascal_to_string(pascal_string: bytes, encoding="mac-roman", start: int = 0)
     return dest.decode(encoding) if actual_length > 0 else ""
 
 
+def format_table(
+    headers: list[str], rows: list[list[str]], max_width: int = 80, flex_col: int = 1
+) -> list[str]:
+    """Format column headers and rows as a fixed-width table of at most max_width
+    characters.
+
+    Every column is as wide as its widest cell, except column flex_col (the file
+    name column), which absorbs whatever width is left in the max_width budget;
+    a cell that does not fit is truncated with '...' at the end.
+    """
+    num_cols = len(headers)
+    widths = [len(header) for header in headers]
+    for row in rows:
+        for i in range(num_cols):
+            widths[i] = max(widths[i], len(row[i]))
+    sep = "  "
+    # Give column flex_col whatever budget is left after the other columns:
+    widths[flex_col] = min(
+        widths[flex_col],
+        max(
+            max_width - (sum(widths) - widths[flex_col]) - len(sep) * (num_cols - 1), 1
+        ),
+    )
+
+    def truncate(cell: str, width: int) -> str:
+        if len(cell) <= width:
+            return cell
+        return (cell[: width - 3] + "...") if width > 3 else cell[:width]
+
+    lines = [
+        sep.join(headers),
+        "-" * (sum(widths) + len(sep) * (num_cols - 1)),
+    ]
+    for row in rows:
+        lines.append(
+            sep.join(
+                truncate(cell, width).ljust(width) for cell, width in zip(row, widths)
+            )
+        )
+    return lines
+
+
+def _expand_dle_leading_spaces(line: bytes) -> bytes:
+    """Expand the optional leading-space compression code of one line.
+
+    Per LisaOsTextFileSpecification.txt, a sequence of spaces at the beginning
+    of a line may be stored as a two-byte code: a DLE character (0x10) followed
+    by a byte containing 32 plus the number of spaces represented. Real Lisa
+    text editors write this code; a DLE at the start of a line is always
+    interpreted as the code by Lisa readers, so it is expanded here (the code
+    never appears anywhere else in a line). A DLE followed by a byte below 33
+    (i.e. "zero or fewer" spaces, a degenerate code no writer emits) is not
+    expanded, so a literal 0x10 0x20 pair at a line start is preserved.
+    """
+    if len(line) >= 2 and line[0] == 0x10 and line[1] >= 33:
+        return b" " * (line[1] - 32) + line[2:]
+    return line
+
+
 def lisa_text_file_to_host_text(file_data: bytes) -> bytes:
     """The inverse of LisaFileSystemToolAddFile.build_lisa_text_file_data():
     convert the on-disk byte stream of a Lisa ".TEXT" file into plain host text.
@@ -2821,8 +2905,10 @@ def lisa_text_file_to_host_text(file_data: bytes) -> bytes:
     each page contains
     CR-terminated (0x0D) lines and is filled with nulls after the last line,
     the first CR-null (0x0D 0x00) pair in a page signaling its end. This
-    function strips the header page and the null padding of every page, and
-    converts the Lisa CR line endings to host "\\n".
+    function strips the header page and the null padding of every page,
+    expands the optional DLE leading-space compression code (see
+    _expand_dle_leading_spaces()), and converts the Lisa CR line endings to
+    host "\\n".
 
     Notes:
       * a page may end well before its 1023rd byte: real Lisa text editors
@@ -2834,13 +2920,17 @@ def lisa_text_file_to_host_text(file_data: bytes) -> bytes:
         with a CR inserted at each page boundary (see
         build_lisa_text_file_data()); those inserted CRs are indistinguishable
         from real line ends, so they appear as extra "\\n" in the result;
-      * a null byte in the middle of a line (not after a CR) is kept as-is.
+      * a null byte in the middle of a line (not after a CR) is kept as-is;
+      * this is an exact byte-level inverse for files that do not use the
+        DLE leading-space compression; for files that do (real Lisa editor
+        files), the result holds the same logical text, with the compressed
+        spaces expanded to literal space characters.
     """
     page_size = 2 * SECTOR_SIZE_IN_BYTES
     # Strip the header page (not part of the file's contents). A ".TEXT" file
     # is always at least one page long; a shorter (malformed) file is kept whole.
     if len(file_data) >= page_size:
-        file_data = file_data[page_size :]
+        file_data = file_data[page_size:]
     out = bytearray()
     for off in range(0, len(file_data), page_size):
         page = file_data[off : off + page_size]
@@ -2852,7 +2942,12 @@ def lisa_text_file_to_host_text(file_data: bytes) -> bytes:
             # Malformed page (no CR-null terminator): keep the data, drop the
             # trailing null padding.
             out += page.rstrip(b"\x00")
-    return bytes(out).replace(b"\r", b"\n")
+    # Expand the DLE leading-space compression code at the start of each
+    # (CR-terminated) line; the code can only occur there:
+    out = b"\r".join(
+        _expand_dle_leading_spaces(line) for line in bytes(out).split(b"\r")
+    )
+    return out.replace(b"\r", b"\n")
 
 
 def compute_dc42_checksum_of_file_data_block(
@@ -3354,7 +3449,14 @@ def interleave5(sector: int) -> int:
 
 # Example usage:
 if __name__ == "__main__":
-    available_commands = ("deserialize", "info", "list", "dump", "fix_dc42_checksum")
+    available_commands = (
+        "deserialize",
+        "info",
+        "list",
+        "dump",
+        "dump-flatten",
+        "fix_dc42_checksum",
+    )
 
     if len(sys.argv) != 3:
         print("Usage: python LisaFileSystemTool.py <command> <disk image file name>")
@@ -3367,8 +3469,16 @@ if __name__ == "__main__":
         )
         print("  list           List the files on the disk image.")
         print(
-            "  dump           Dump all files from the disk image into folder /tmp/dc42-dump"\
+            "  dump           Dump all files from the disk image into folder /tmp/dc42-dump"
             " (a '/' in a Lisa file name becomes a subfolder there)."
+        )
+        print(
+            "  dump-flatten   Like 'dump', but a '/' in a Lisa file name is replaced with a '-'"
+            ", so all files are dumped into the single /tmp/dc42-dump folder."
+        )
+        print(
+            "                 Note: two file names that differ only by '/' vs '-' (e.g. 'a/b.txt'"
+            " and 'a-b.txt') map to the same host file; the one dumped later overwrites the earlier one."
         )
         print(
             "  fix_dc42_checksum  Fix the DC42 header data/tags checksums, but only if they are wrong."
@@ -3418,6 +3528,8 @@ if __name__ == "__main__":
             file_system.dump_catalog()
     elif command == "dump":
         file_system.dump_files()
+    elif command == "dump-flatten":
+        file_system.dump_files(flatten=True)
     elif command == "fix_dc42_checksum":
         try:
             file_system.fix_dc42_checksum()

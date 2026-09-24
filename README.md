@@ -1,7 +1,7 @@
 # LisaFileSystemTool — a tool for reading and modifying the Lisa OS File System disk images
 
 **Author:** [TorZidan](https://github.com/TorZidan)  
-**Last Updated:** Sept 19, 2026  
+**Last Updated:** Sept 23, 2026  
 
 ## Overview
 
@@ -19,6 +19,12 @@ Apple Lisa Office System (aka LOS) and Workshop disk images. It understands
 two image container formats (DC42 and Raw ProFile), works with both floppy and ProFile/hard-disk
 volumes, and works with every known LOS file-system version (v14 = LOS 1.0 through v17 = LOS 3.1,
 i.e. both the old "flat catalog" volumes and the newer HFS-style B-tree catalog volumes). 
+
+A companion tool, `LisaFileSystemToolPerFile.py` (described in §1.3), extends it with the
+`add` file and `replace` file commands: it can add a new file to a disk image, or replace the contents of
+an existing file, on both flat-catalog (LOS 1.0/2.0) and B-tree (LOS 3.0/3.1) hard-disk volumes.
+It is a thin extension of `LisaFileSystemTool.py` — all the disk-image machinery is imported
+from there, and only the add/replace-specific code lives in the second file.
 
 The tool can remove file copy protection from such disk images (if any is present), which makes
 them more universal: they are no-longer tied to a specific Lisa serial number, and thus can be used (run successfully) on any real and emulated Lisa. 
@@ -65,6 +71,33 @@ The disk image type is auto-detected: if the 2-byte `fileFormat` field at offset
 Practical limits: the whole image is read into memory; files longer than
 100 000 000 bytes are rejected; DC42 images with `tagSize == 0` are rejected (the tool
 needs the tag fields to navigate the file system).
+
+### 1.3 The companion tool `LisaFileSystemToolPerFile.py` — adding and replacing files
+
+`LisaFileSystemToolPerFile.py` is a companion tool that **writes** files onto a disk image.
+It is a thin extension of `LisaFileSystemTool.py` (all the disk-image machinery is imported
+from there; only the add/replace-specific code lives in this file). **It is experimental.**
+
+```
+python LisaFileSystemToolPerFile.py add     <disk image file name> <host file> <lisa file name>
+python LisaFileSystemToolPerFile.py replace <disk image file name> <host file> <lisa file name>
+```
+
+| Command   | What it does |
+|-----------|--------------|
+| `add`     | Adds the host file to the volume as a new file with the given Lisa name. A new s-file number, hint and data pages, and a catalog entry are allocated and written, and all affected checksums are fixed up. If a file with the same name already exists, nothing is written. |
+| `replace` | Replaces the contents of an existing file (found by name, case-insensitive) in place, reusing the file's existing sectors: if the new file is larger, only the extra sectors are newly allocated; if it is smaller, the unused old sectors are freed. If no file with that name exists, nothing is changed. |
+
+Exit codes: `0` = success; `3` = nothing was done (`add`: a file with that name already exists /
+`replace`: no file with that name on the volume); `1` = any other failure. 
+
+**Text files**: if the Lisa file name ends with ".TEXT" (case-insensitive), the host file is
+first converted to the on-disk Lisa text layout (see `LisaOsTextFileSpecification.txt`):
+line endings become \r, the text is laid out in 1024-byte pages of CR-terminated lines with an
+all-zero 1024-byte header page prepended, and the stray trailing 0xFF byte that the Computer
+History Museum source archive appends to its text files is stripped. Together with the `dump`
+command of `LisaFileSystemTool.py` (which converts a .TEXT file back to host text), this makes
+`dump` → edit on the host → `add`/`replace` a good round trip.
 
 ---
 
@@ -683,8 +716,6 @@ formats in the host's local time zone. `0` means "never/undefined".
 ## 9. FAQ
 
 * Can this tool remove password protections? Answer: No. Long answer: LOS allows setting up a password for specific files (select the file's icon, then use the File->Attributes of ..." menu to set/remove a password). The password is being encrypted and stored in the "hint sector" of the file and it can be printed by this too (see function `print_hint_sector_info()`). The `deserialize` tool command does not deal with these files, but this feature could be added. 
-
-* Can this tool do any other kinds of "edits", e.g. can it add a new file to a disk image? Answer: Yes, you can do so using the tool LisaFileSystemToolAddFile.py . It needs more testing before I can formally add and document it here.
 
 ---
 
