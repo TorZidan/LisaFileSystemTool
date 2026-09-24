@@ -11,9 +11,8 @@ ProFile disk image **`LOS_Compilation_Base.image`**, so that you can boot the
 image in LisaEm (or on a real Lisa with an ESProfile) and compile the Lisa OS
 from source with Workshop.
 
-It is built on top of `../LisaFileSystemToolPerFile.py` (the `add` and
-`replace` commands — see the project README, §1.3). The script itself contains
-one explicit upload line per file; there is no file discovery.
+The shell script uses the `../LisaFileSystemToolPerFile.py` tool (the `add` and
+`replace` commands — see the project README, §1.3). 
 
 ## What the script does
 
@@ -22,8 +21,7 @@ Given the folder that contains the Lisa OS source tree (it must have
 
 1. **Replaces** the `system.os` on the image with the local
    [`system.os`](system.os) from this folder (see the workaround below —
-   this is done with the `replace` command, which is not affected by the
-   LOS overwrite bug).
+   this is done with the `replace` command).
 2. **Adds** the local [`MAKE-ALL_NODISKS2.TEXT`](MAKE-ALL_NODISKS2.TEXT)
    build script, stored on the image as `ALEX/MAKE/ALL_NODISKS2.TEXT`.
 3. **Adds 858 selected source files** from the source tree, from the
@@ -32,8 +30,6 @@ Given the folder that contains the Lisa OS source tree (it must have
    (BUILD, GUIDE_APIM, LIBS, OS, TKIN, TKALERT).
 
 That is **860 upload operations in total** (1 replace + 859 adds).
-
-(The 859 adds are the one local make script plus the 858 source-tree files.)
 
 The host files are unix-converted Lisa text files named `<name>.TEXT.unix.txt`
 (a few have slightly different names — e.g. lowercase `.text.unix.txt`, or a
@@ -44,6 +40,12 @@ the image); on the disk image each one is stored under the Lisa file name
 The script works on the image **in place** (it is not idempotent-safe to run
 twice expecting "860 added" — on a re-run the already-present files are
 simply counted as "already present", and that is *not* an error).
+
+## Why do we have to do this?
+Can't you share a disk image file with the Lisa OS source files already "uploaded" onto it?
+
+Answer: I can't share such disk image because of license limitations. At https://info.computerhistory.org/apple-lisa-code we read:
+  - You may not, and you agree not to: redistribute, publish, sublicense, sell, rent or transfer the Apple Software.
 
 ## The system.os workaround (read this)
 
@@ -145,11 +147,12 @@ is a copy of
 from Alexander McLeod's
 [LisaSourceCompilation](https://github.com/alexthecat123/LisaSourceCompilation)
 repository. It contains a fresh installation of LOS 3.0 and Workshop 3.0
-plus his build scripts.
+plus his build scripts. It does NOT contain the Lisa OS source files.
 
-**Credits:** thanks to Alexander McLeod for preparing the base image and for
-figuring out how to compile the Lisa OS sources in the first place. This
-script is a modified version of his instructions/workflow.
+
+## Credits and Thanks
+Thanks to [Alexander McLeod](https://github.com/alexthecat123) for preparing the `LOS_Compilation_Base.image` and for
+figuring out how to compile the Lisa OS sources in the first place. 
 
 
 ## How to compile the Lisa OS sources on a real Lisa 
