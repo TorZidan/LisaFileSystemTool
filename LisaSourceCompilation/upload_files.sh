@@ -84,7 +84,11 @@ fail=0
 # The "replace" command does not have such bug, and is able to successfully replace the file.
 python3 ../LisaFileSystemToolPerFile.py replace "$IMAGE" system.os system.os ; case $? in 0) ok=$((ok+1));; 3) skip=$((skip+1));; *) fail=$((fail+1));; esac
 
+# Some build macros:
 python3 ../LisaFileSystemToolPerFile.py add "$IMAGE" MAKE-ALL_NODISKS2.TEXT ALEX/MAKE/ALL_NODISKS2.TEXT ; case $? in 0) ok=$((ok+1));; 3) skip=$((skip+1));; *) fail=$((fail+1));; esac
+python3 ../LisaFileSystemToolPerFile.py add "$IMAGE" MAKE-CLEAN.TEXT ALEX/MAKE/CLEAN.TEXT ; case $? in 0) ok=$((ok+1));; 3) skip=$((skip+1));; *) fail=$((fail+1));; esac
+
+# The Lisa OS source files:
 python3 ../LisaFileSystemToolPerFile.py add "$IMAGE" "$APPS/APBG/apbg-BG1.0.TEXT.unix.txt" "apbg/BG1/0.TEXT" ; case $? in 0) ok=$((ok+1));; 3) skip=$((skip+1));; *) fail=$((fail+1));; esac
 python3 ../LisaFileSystemToolPerFile.py add "$IMAGE" "$APPS/APBG/apbg-BG1A.TEXT.unix.txt" "apbg/BG1A.TEXT" ; case $? in 0) ok=$((ok+1));; 3) skip=$((skip+1));; *) fail=$((fail+1));; esac
 python3 ../LisaFileSystemToolPerFile.py add "$IMAGE" "$APPS/APBG/apbg-BG1B.TEXT.unix.txt" "apbg/BG1B.TEXT" ; case $? in 0) ok=$((ok+1));; 3) skip=$((skip+1));; *) fail=$((fail+1));; esac
