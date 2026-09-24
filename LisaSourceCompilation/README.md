@@ -1,6 +1,11 @@
 
 # Uploading Lisa OS source files to a ProFile disk image and compiling them in Lisa Workshop
 
+**Author:** [TorZidan](https://github.com/TorZidan)  
+**Last Updated:** Sept 23, 2026  
+
+## Overview
+
 The presented `upload_files.sh` is a Linux shell script that "uploads" the (patched) Lisa OS source files onto the
 ProFile disk image **`LOS_Compilation_Base.image`**, so that you can boot the
 image in LisaEm (or on a real Lisa with an ESProfile) and compile the Lisa OS
