@@ -1890,7 +1890,8 @@ class InMemoryFileSystem:
         if file_rows:
             print()
             for line in format_table(
-                ["s_file_id", "file_name", "file_size", "physical_size"], file_rows
+                ["s_file_id", "file_name", "size", "created", "last_modified"],
+                file_rows,
             ):
                 print(line)
         print(
@@ -2099,7 +2100,7 @@ class InMemoryFileSystem:
         Returns a category string: 'file', 'directory', 'thread' or 'other'.
 
         If rows is not None, file entries are not printed verbosely; instead their
-        [s_file_id, file_name, file_size, physical_size] row is appended to rows
+        [s_file_id, file_name, size, created, last_modified] row is appended to rows
         (table mode, used by the 'list' command).
 
         All records start with a 36-byte key (see MakeKey in LISA_OS/OS/source-fsasm.text.unix.txt):
@@ -2160,7 +2161,13 @@ class InMemoryFileSystem:
                 # table printed by dump_catalog(); skip the verbose per-entry output
                 # (and the s_entry lookup it needs).
                 rows.append(
-                    [str(s_file_id), key_name, str(file_size), str(physical_size)]
+                    [
+                        str(s_file_id),
+                        key_name,
+                        str(file_size),
+                        format_date(file_dtc) if file_dtc != 0 else "never (0)",
+                        format_date(file_dtm) if file_dtm != 0 else "never (0)",
+                    ]
                 )
                 return "file"
             hint_sector_number, data_start_sector_number = self.get_sentry_for_sfile(
@@ -2542,15 +2549,24 @@ class InMemoryFileSystem:
                 continue  # no valid hint page exists for this sfile
             hint_sector_bytes = self.read_sector(hint_sector_number)
             file_name = pascal_to_string(hint_sector_bytes, start=0)
-            # The flat catalog stores no physical size of its own; derive it the same
-            # way the B-tree catalog's physSize field is defined: the file size rounded
-            # up to the next 512 bytes.
-            physical_size = (filesize + 511) // 512 * 512
-            rows.append([str(s_file_id), file_name, str(filesize), str(physical_size)])
+            # The hentry's DTC/DTM fields (created / last modified; layout above,
+            # DTC(4)@0x2E, DTM(4)@0x36)
+            file_dtc = to_uint32_big_endian(hint_sector_bytes, 0x2E)
+            file_dtm = to_uint32_big_endian(hint_sector_bytes, 0x36)
+            rows.append(
+                [
+                    str(s_file_id),
+                    file_name,
+                    str(filesize),
+                    format_date(file_dtc) if file_dtc != 0 else "never (0)",
+                    format_date(file_dtm) if file_dtm != 0 else "never (0)",
+                ]
+            )
         if rows:
             print()
             for line in format_table(
-                ["s_file_id", "file_name", "file_size", "physical_size"], rows
+                ["s_file_id", "file_name", "size", "created", "last_modified"],
+                rows,
             ):
                 print(line)
         print(f"Found {num_files} file(s) in the slist.")
@@ -2866,7 +2882,10 @@ def format_table(
         return (cell[: width - 3] + "...") if width > 3 else cell[:width]
 
     lines = [
-        sep.join(headers),
+        sep.join(
+            truncate(header, width).ljust(width)
+            for header, width in zip(headers, widths)
+        ).rstrip(),
         "-" * (sum(widths) + len(sep) * (num_cols - 1)),
     ]
     for row in rows:
