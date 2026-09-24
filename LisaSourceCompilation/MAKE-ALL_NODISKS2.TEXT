@@ -21,7 +21,8 @@ $SUBMIT ALEX/MAKE/FULLOS {The core OS, bootloaders, and drivers}
 $DOIT
 $SUBMIT ALEX/MAKE/INSTALLER(1) {The installer, but not the install disks}
 $DOIT
-{##### THIS STEP IS DISABLED: $SUBMIT ALEX/MAKE/APIM(1) : LisaGuide #####}
+{##### This file is a copy of https://github.com/alexthecat123/LisaSourceCompilation/blob/main/src/MAKE/ALEX-MAKE-ALL_NODISKS.TEXT ; here, the two steps below (build LisaGuide) are disabled. #####}
+{##### THIS STEP IS DISABLED: $SUBMIT ALEX/MAKE/APIM(1) #####}
 {##### THIS STEP IS DISABLED: $DOIT #####}
 
 $ENDEXEC
