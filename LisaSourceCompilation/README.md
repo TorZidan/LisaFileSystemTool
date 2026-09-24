@@ -90,8 +90,10 @@ layout).
 
 1. Download `lisa-source.zip` from
    <https://info.computerhistory.org/apple-lisa-code> and unzip it.
+
 2. In the folder with the unzipped files there is one subfolder,
    `Lisa_Source` (that is the source root the script expects).
+
 3. Download Alexander McLeod's
    [`patch_files.py`](https://github.com/alexthecat123/LisaSourceCompilation/blob/main/scripts/patch_files.py)
    and run it from inside that folder:
@@ -101,15 +103,8 @@ layout).
    ```
 
    It should print `Successfully applied 248/248 patches`.
-4. In **this** folder, make a fresh working copy of the image:
 
-   ```
-   cp LOS_Compilation_Base_original.image LOS_Compilation_Base.image
-   ```
-
-   (`LOS_Compilation_Base_original.image` is the pristine copy; the script
-   always modifies `LOS_Compilation_Base.image`.)
-5. Run the script, passing the folder that *contains* `Lisa_Source`:
+4. Run the script, passing the folder that *contains* `Lisa_Source`:
 
    ```
    ./upload_files.sh /path/to/folder-containing-Lisa_Source
@@ -124,7 +119,7 @@ layout).
    Done: 860 file(s) added, 0 already present, 0 failure(s).
    ```
 
-6. Mount `LOS_Compilation_Base.image` in the LisaEm emulator, or on a real
+5. Mount `LOS_Compilation_Base.image` in the LisaEm emulator, or on a real
    Lisa using an ESProfile hardware emulator; boot into Workshop and run
    `<ALEX/MAKE/ALL_NODISKS2` to build everything except Lisa Guide.
 
