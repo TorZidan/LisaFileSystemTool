@@ -855,41 +855,6 @@ python3 ../LisaFileSystemToolPerFile.py add "$IMAGE" "$LISA_OS/OS/source-fsdir.t
 python3 ../LisaFileSystemToolPerFile.py add "$IMAGE" "$LISA_OS/OS/SOURCE-FSINIT1.TEXT.unix.txt" "SOURCE/FSINIT1.TEXT" ; case $? in 0) ok=$((ok+1));; 3) skip=$((skip+1));; *) fail=$((fail+1));; esac
 python3 ../LisaFileSystemToolPerFile.py add "$IMAGE" "$LISA_OS/OS/SOURCE-FSINIT2.TEXT.unix.txt" "SOURCE/FSINIT2.TEXT" ; case $? in 0) ok=$((ok+1));; 3) skip=$((skip+1));; *) fail=$((fail+1));; esac
 python3 ../LisaFileSystemToolPerFile.py add "$IMAGE" "$LISA_OS/OS/source-fsinit.text.unix.txt" "source/fsinit.text" ; case $? in 0) ok=$((ok+1));; 3) skip=$((skip+1));; *) fail=$((fail+1));; esac
-
-# Here is the pach of the Lisa sources, to fix the bug discussed further up.
-# In file fsprim.text: apply the fileio tag-chain bug fix to a scratch copy before uploading.
-# Bug: in the middle-pages loop of fileio, the disk (non-VM) branch is missing the
-# update_link patch that the VM branch has. When a write extends a file with whole
-# pages past the old EOF (cold VM cache, write ends on a page boundary), the old
-# leof page's fwdlink is left = END, silently truncating the file's tag chain
-# (this is what corrupted SYSTEM.OS during the Workshop/Make build).
-# Fix: reuse the VM branch's patch at the top of the disk branch.
-
-# FSPRIM_TMP=./source-fsprim_fixed.text.unix.txt # We will apply the code patch below to this temporary file, then upload it, and then delete it.
-# cp "$LISA_OS/OS/source-fsprim.text.unix.txt" "$FSPRIM_TMP"
-# python3 - "$FSPRIM_TMP" <<'FSFIX'
-# import sys
-# p = sys.argv[1]
-# data = open(p, 'rb').read()
-# anchor = b"    end   (* of vm buffer access *)\n    else\n    begin\n"
-# fix = (b"      (* in case other middle contig pgs. need to link to this pg *)\n"
-#        b"      if (currelpage > lastrelpage) and update_link then    (* connect lastrelpage to new pages *)\n"
-#        b"      begin\n"
-#        b"        nextioreqp^.pflink := curabspage; (* writing a new pflink *)\n"
-#        b"        update_link := false;             (* link has now been updated *)\n"
-#        b"      end;\n"
-#        b"\n")
-# if (anchor in data) and ((anchor + fix) not in data):
-#     open(p, 'wb').write(data.replace(anchor, anchor + fix, 1))
-#     print("fsprim fix: applied to " + p)
-# elif (anchor + fix) in data:
-#     print("fsprim fix: already present in " + p)
-# else:
-#     print("fsprim fix: WARNING: anchor not found in " + p + " - uploading UNMODIFIED file", file=sys.stderr)
-# FSFIX
-# python3 ../LisaFileSystemToolPerFile.py add "$IMAGE" "$FSPRIM_TMP" "source/fsprim.text" ; case $? in 0) ok=$((ok+1));; 3) skip=$((skip+1));; *) fail=$((fail+1));; esac
-# rm -f "$FSPRIM_TMP"
-
 python3 ../LisaFileSystemToolPerFile.py add "$IMAGE" "$LISA_OS/OS/source-fsprim.text.unix.txt" "source/fsprim.text" ; case $? in 0) ok=$((ok+1));; 3) skip=$((skip+1));; *) fail=$((fail+1));; esac
 python3 ../LisaFileSystemToolPerFile.py add "$IMAGE" "$LISA_OS/OS/source-fsui1.text.unix.txt" "source/fsui1.text" ; case $? in 0) ok=$((ok+1));; 3) skip=$((skip+1));; *) fail=$((fail+1));; esac
 python3 ../LisaFileSystemToolPerFile.py add "$IMAGE" "$LISA_OS/OS/source-fsui2.text.unix.txt" "source/fsui2.text" ; case $? in 0) ok=$((ok+1));; 3) skip=$((skip+1));; *) fail=$((fail+1));; esac

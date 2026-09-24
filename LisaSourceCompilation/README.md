@@ -55,32 +55,11 @@ conditions). The bug lives in `system.os` itself — and the LOS build process
 triggers exactly that: it builds a new `system.os` that is slightly larger
 than the current one and overwrites it, which corrupts the file system; the
 next boot then fails with error **10730** ("system.os is corrupted").
-(Ironically, the bug in system.os causes the corruption of file system.os.)
+Ironically, the bug in system.os causes the corruption of the very same file system.os.
 
-Concretely (see the comment block in the script): in fileio's middle-pages
-loop, the disk (non-VM) branch is missing the `update_link` patch that the
-VM branch has. When a write extends a file with whole pages past the old EOF
-(cold VM cache, write ends on a page boundary), the old leof page's fwdlink
-is left as END, silently truncating the file's tag chain.
-
-The script also contains a **commented-out (disabled)** code fix for this
-bug that would patch `source/fsprim.text` on the fly before uploading it;
-currently the unmodified `fsprim.text` is uploaded, and the size workaround
-below is what actually protects the build.
-
-The workaround, baked into this folder's files:
-
-* [`system-orig-fromlos-compilation-base.os`](system-orig-fromlos-compilation-base.os)
-  is the pristine 185,344-byte `system.os` as it came in the base image.
-* [`system.os`](system.os) is that same file **padded with zero bytes to
-  194,000 bytes**.
-* The script's first step replaces the image's `system.os` with the padded
-  one. The compiled `system.os` is 193,024 bytes — smaller than 194,000 — so
-  when the build overwrites it, the (buggy) in-place overwrite works fine and
-  the volume is not corrupted.
-* `LOS_Compilation_Base_currupted_error_10730_at_startup.image` in this
-  folder is a keep-for-reference copy of an image that hit this exact bug
-  before the workaround was in place.
+The workaround is to pad the original system.os file (of size 185344 bytes) to a new size of 194,000 bytes before running the compilations,
+so that the generated system.os file (of size 193,024 bytes) will be smaller than the current file (of size 194,000), so overwriting it would work just fine.
+The "replace" command does not have such bug, and is able to successfully replace the file.
 
 ## Usage
 
@@ -163,19 +142,22 @@ It will build all Lisa OS sources, except Lisa Guide. Upon success, you will arr
 
 Your next immediate task is to shut down and restart your Lisa. Why: the build script overwrites the Lisa OS file `system.os` which is basically the file system. So, at this point, a restart is needed, to "pick up the new file".
 
-To compile LisaGuide: Chose (R)un, then type `ALEX/MAKE/APIM(1)` ; here, "(1)" is a macro argument which means "skip creating a LisaGuide floppy disk".
+Easter egg unlocked! Once you build everything and restart your Lisa, at the "environments selection" window there will be a new "UltraDOS" environment. Check it out. Not seeing the "environments selection" window ? Reboot again and press any key while Lisa is booting, it will show up.
 
-Note: Alex's original instructions at https://github.com/alexthecat123/LisaSourceCompilation use the `<ALEX/MAKE/ALL_NODISKS` command, which includes LisaGuide. I have split it in two here, because, if run in one command, LisdEm (discussed below) crashes, most likely due to out-of-memory.
+And last step: to compile LisaGuide in Workshop, choose (R)un, then type `ALEX/MAKE/APIM(1)` ; here, "(1)" is a macro argument which means "skip creating a LisaGuide floppy disk".
+
+Note: Alex's original instructions at https://github.com/alexthecat123/LisaSourceCompilation use the `<ALEX/MAKE/ALL_NODISKS` command, which includes LisaGuide. I have split it in two above, because, if run in one command, LisaEm (and maybe a real Lisa) crashes, most likely due to out-of-memory.
+
 
 ## How to compile the Lisa OS sources in the LisaEm emulator
 
-Read my https://github.com/arcanebyte/lisaem/blob/master/LisaEmAsASoftwareDevelopmentEnvironment.md . 
+Read my https://github.com/arcanebyte/lisaem/blob/master/LisaEmAsASoftwareDevelopmentEnvironment.md . Instead of the "pseudo-tty serial port file upload" described here, we use the subject script to do the file "upload".
 
-Download and run the most recent "continuous" build for your platform from https://github.com/arcanebyte/lisaem/releases (the "2.0" release is missing important bug fixes).
+Download and run the most recent "continuous" LisaEm build for your platform from https://github.com/arcanebyte/lisaem/releases (the "2.0" release is missing important bug fixes).
 Configure LisaEm to use 1.5 MB or RAM, H-ROMs, "I/O ROM of "88". Mount the `LOS_Compilation_Base.image` on the "internal" parallel port. 
 
-The follow the instructions "on a real Lisa" above.
+Then follow the instructions "on a real Lisa" above.
 
-This process has been verified to works repeatedly and consistently well, with no crashes. On my PC, it takes about a minute to "upload" the lisa source files (using the shell script above), and about 5 minutes to compile everything (except LisaGuide) at top emulation speed (Throttle->512Mhz).
+This process has been verified to works repeatedly and consistently well, with no crashes. On my PC, it takes about a minute to "upload" the Lisa OS source files (using the shell script above), and about 5 minutes to compile everything (except LisaGuide) at top emulation speed (Throttle->512Mhz).
 
-Enjoy!
+This opens the doors for a full "write code -> upload it -> build it-> run it -> test it" automated AI development cycle with LisaEm. Exciting times. Enjoy!
