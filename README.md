@@ -105,9 +105,10 @@ command of `LisaFileSystemTool.py` (which converts a .TEXT file back to host tex
 The disk image type is auto-detected: if the 2-byte `fileFormat` field at offset `0x52` is
 `0x0100` (aka DC42 magic number), the file is treated as DC42, otherwise as a raw ProFile image.
 
-Practical limits: the whole image is read into memory; files longer than
+Practical limits: the whole disk image file is read into memory; files longer than
 100 000 000 bytes are rejected; DC42 images with `tagSize == 0` are rejected (the tool
 needs the tag fields to navigate the file system).
+
 ---
 
 ## 2. The image container formats
