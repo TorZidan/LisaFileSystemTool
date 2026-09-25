@@ -61,11 +61,11 @@ python3 LisaFileSystemTool.py <command> <disk image file name>
 | `fix_dc42_checksum`| For DC42 files: checks if the data and tag checksums are correct in the DC42 header, and fixes the incorrect ones, if any. |
 
 
-### 1.2 I LisaFileSystemToolPerFile.py  — adding, replacing and deleting files
+### 1.2 LisaFileSystemToolPerFile.py  — adding, replacing and deleting files
 
 `LisaFileSystemToolPerFile.py` is a companion tool that **writes** files onto a disk image.
-It is a thin extension of `LisaFileSystemTool.py` (all the disk-image machinery is imported
-from there; only the add/replace/delete-specific code lives in this file). **It is experimental.**
+It is a thin extension of `LisaFileSystemTool.py` (all the disk-image machinery code is imported
+from there; only the add/replace/delete-specific code lives in this file).
 
 ```
 python3 LisaFileSystemToolPerFile.py add     <disk image file name> <host file name> <lisa file name>
