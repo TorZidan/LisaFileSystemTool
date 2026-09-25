@@ -1768,6 +1768,180 @@ class InMemoryFileSystem:
                     if iteration_number > 10000:
                         raise f"Infinite loop detected while reading contents of file_id {self.get_file_id_type_from_tag_data_for_sector(next_abs_sector_to_read)}, file_name '{file_name}'! Perhaps the file system is corrupted? Exiting."
 
+    def visualize_volume(self):
+        """Print a one-character-per-sector map of the whole volume, 64 sectors per line,
+        covering every sector of the disk image (sector 0 .. num_sectors-1).
+
+        The character of a sector is derived from the file_id in its tag and the
+        allocation bitmap:
+          B = boot sector (tag file_id 0xAAAA)
+          L = loader sector (tag file_id 0xBBBB)
+          M = MDDF sector (tag file_id 0x0001)
+          P = allocation bitmap sector (tag file_id 0x0002)
+          S = s-record (slist) sector (tag file_id 0x0003)
+          C = B-tree catalog sector (tag file_id 0x0004)
+          H = hint (hentry) sector (tag file_id = -s_file_id; see _locate_hint_page_for_sfile())
+          9..2 = data sectors of the 1st..8th largest file (by the slist's filesize)
+          1 = data sectors of all other files (the 9th largest and smaller)
+          ? = allocated sector of unknown kind: its tag says it is free (0x0000/0x7FFF),
+              or it names a file that is not in the slist (stale tag or unknown hint page)
+          . = free sector (marked free in the allocation bitmap)
+
+        A file's data sectors are exactly the sectors tagged with that file's s_file_id:
+        the per-sector file_id in the tag is the most reliable record of which sectors
+        belong to a file (see _read_file_data_from_tagged_sectors()).
+        """
+        mddf_bytes = self._mddf_sector_bytes
+        mddf_sector_number = self._mddf_sector_number
+        num_sectors = self._num_sectors
+        tag_size = self._single_tag_size
+
+        # ---- Step 1: enumerate the files from the slist --------------------------
+        file_sizes: dict[int, int] = {}  # s_file_id -> filesize (only files with data)
+        file_names: dict[int, str] = {}  # s_file_id -> name (best effort, from hintaddr)
+        slist_addr = to_uint32_big_endian(mddf_bytes, 0x94)
+        slist_packing = to_uint16_big_endian(mddf_bytes, 0x98)
+        slist_block_count = to_uint16_big_endian(mddf_bytes, 0x9A)
+        if slist_packing and slist_block_count:
+            for page in range(slist_block_count):
+                table = self.read_sector(mddf_sector_number + slist_addr + page)
+                for idx in range(slist_packing):
+                    s_file_id = page * slist_packing + idx
+                    if s_file_id == 0:
+                        continue  # the slist is indexed by s_file_id, and 0 is not a valid id
+                    off = idx * 14  # each s_entry is 14 bytes
+                    hintaddr = to_uint32_big_endian(table, off)
+                    fileaddr = to_uint32_big_endian(table, off + 4)
+                    filesize = to_uint32_big_endian(table, off + 8)
+                    if hintaddr == 0:
+                        continue  # unused slist slot
+                    if 0 < hintaddr < 0x7FFFFFFF:
+                        file_names[s_file_id] = pascal_to_string(
+                            self.read_sector(mddf_sector_number + hintaddr), start=0
+                        )
+                    # Only a file with a valid data start sector can own data sectors;
+                    # entries with fileaddr=0 (empty) or REDLIGHT (0xFFFFFFFF, stale)
+                    # cannot, so they are excluded from the size ranking below.
+                    if 0 < fileaddr < 0x7FFFFFFF and filesize > 0:
+                        file_sizes[s_file_id] = filesize
+
+        # ---- Step 2: rank the files by size; the 8 largest get the digits 9..2 ---
+        file_chars: dict[int, str] = {}  # s_file_id -> the digit for its data sectors
+        ranked_files = sorted(file_sizes.items(), key=lambda kv: kv[1], reverse=True)
+        for rank, (s_file_id, _) in enumerate(ranked_files):
+            file_chars[s_file_id] = str(9 - rank) if rank < 8 else "1"
+
+        # ---- Step 3: read the whole allocation bitmap into memory ----------------
+        bitmap_start_rel = to_uint32_big_endian(mddf_bytes, 0x88)
+        num_bitmap_sectors = to_uint16_big_endian(mddf_bytes, 0x92)
+        bitmap = bytearray()
+        for i in range(num_bitmap_sectors):
+            bitmap += self.read_sector(mddf_sector_number + bitmap_start_rel + i)
+
+        def is_allocated(abs_sector: int) -> bool:
+            """True if the sector is marked as allocated in the allocation bitmap.
+            Sectors outside the bitmap's coverage (e.g. before the MDDF sector) count as free."""
+            rel = abs_sector - mddf_sector_number
+            if rel < 0 or rel >= len(bitmap) * 8:
+                return False
+            return bool(bitmap[rel // 8] & (1 << (rel & 7)))
+
+        # ---- Step 4: classify every sector from the file_id in its tag -----------
+        if self._is_dc42_format:
+            # In DC42 images the tags form one contiguous block right after all the sector data:
+            tag_region = self._file_bytes[
+                DC42_HEADER_SIZE + num_sectors * SECTOR_SIZE_IN_BYTES :
+                DC42_HEADER_SIZE
+                + num_sectors * (SECTOR_SIZE_IN_BYTES + tag_size)
+            ]
+            tag_region += b"\xff" * (num_sectors * tag_size - len(tag_region))
+            file_ids = [
+                int.from_bytes(tag_region[i * tag_size + 4 : i * tag_size + 6], "big")
+                for i in range(num_sectors)
+            ]
+        else:
+            # In raw images each tag immediately precedes its sector's data, in 5:1 interleave order:
+            file_ids = [
+                int.from_bytes(
+                    self._file_bytes[
+                        interleave5(i) * (SECTOR_SIZE_IN_BYTES + tag_size) + 4 :
+                        interleave5(i) * (SECTOR_SIZE_IN_BYTES + tag_size) + 6
+                    ],
+                    "big",
+                )
+                for i in range(num_sectors)
+            ]
+
+        chars: list[str] = []
+        for i in range(num_sectors):
+            fid = file_ids[i]
+            if fid == 0x0001:
+                ch = "M"
+            elif fid == 0x0002:
+                ch = "P"
+            elif fid == 0x0003:
+                ch = "S"
+            elif fid == 0x0004:
+                ch = "C"
+            elif fid == 0xAAAA:
+                ch = "B"
+            elif fid == 0xBBBB:
+                ch = "L"
+            elif fid in (0x0000, 0x7FFF):
+                # The tag says the sector is free (or erased); the bitmap has the final word.
+                # An allocated sector whose tag claims it is free is of unknown kind: '?'.
+                ch = "?" if is_allocated(i) else "."
+            elif fid >= 0x8000:
+                # A negative 16-bit file_id: this is a hint (hentry) page of the file whose
+                # s_file_id is (0x10000 - fid) (see _locate_hint_page_for_sfile()).
+                # If that file is not in the slist, the allocated sector is of unknown kind: '?'.
+                ch = (
+                    "H"
+                    if (0x10000 - fid) in file_names
+                    else ("?" if is_allocated(i) else ".")
+                )
+            elif fid in file_chars:
+                ch = file_chars[fid]  # a data sector of a known file
+            else:
+                # A file_id that matches no known file (a stale tag): an allocated sector
+                # of unknown kind is '?', a free one is '.'.
+                ch = "?" if is_allocated(i) else "."
+            chars.append(ch)
+
+        # ---- Step 5: print the legend, the map and a summary ---------------------
+        print()
+        print(
+            "Sector map: one character per sector, 64 sectors per line "
+            "(the number in front of each line is the first sector number of that line):"
+        )
+        print("   B = boot sector,\n   L = loader sector,\n   M = MDDF sector,\n   P = allocation bitmap sector,")
+        print("   S = s-record (slist) sector,\n   C = B-tree catalog sector,\n   H = hint (hentry) sector,")
+        if ranked_files:
+            for rank, (s_file_id, size) in enumerate(ranked_files[:8]):
+                name = file_names.get(s_file_id, "?")
+                print(f"   {9 - rank} = File '{name}' ({size} bytes, s_file_id {s_file_id}),")
+        else:
+            print("   9..2 = data sectors of the largest files (no files with data found in the slist),")
+        if len(ranked_files) > 8:
+            print(f"   1 = data sectors of all other files ({len(ranked_files) - 8} more file(s) with data),")
+        else:
+            print("   1 = data sectors of all other files,")
+        print("   ? = allocated sector of unknown kind (tag says free, or names a file not in the slist),")
+        print("   . = free sector")
+        print()
+
+        prefix_width = max(len(str(num_sectors - 1)), 1)
+        for start in range(0, num_sectors, 64):
+            print(f"{start:>{prefix_width}}: " + "".join(chars[start : start + 64]))
+
+        counts: dict[str, int] = {}
+        for ch in chars:
+            counts[ch] = counts.get(ch, 0) + 1
+        summary = " ".join(
+            f"{ch}={counts[ch]}" for ch in "BLMPSCH987654321?." if ch in counts
+        )
+        print(f"\nSector counts: {summary} (total {num_sectors})")
+
     def find_catalog_root_page_sector_number(self):
         """
         Returns the first sector of the catalog entries (aka "root catalog sector number). The returned sector number is relative to the MDDF sector,
@@ -3521,6 +3695,7 @@ if __name__ == "__main__":
         "deserialize",
         "info",
         "list",
+        "visualize",
         "dump",
         "dump-flatten",
         "fix_dc42_checksum",
@@ -3536,6 +3711,11 @@ if __name__ == "__main__":
             "  info           Print disk image info (file format, checksums, MDDF sector)."
         )
         print("  list           List the files on the disk image.")
+        print(
+            "  visualize      Print a one-character-per-sector map of the whole volume, 64 sectors per line"
+            " (B=boot, L=loader, M=MDDF, P=bitmap, S=s-record, C=catalog, H=hentry,"
+            " 9..2=data of the 8 largest files, 1=data of all other files, ?=unknown allocated, .=free)."
+        )
         print(
             "  dump           Dump all files from the disk image into folder /tmp/LisaFileSystemDump"
             " (a '/' in a Lisa file name becomes a subfolder there)."
@@ -3597,6 +3777,8 @@ if __name__ == "__main__":
             file_system.flat_catalog_list_files()
         else:
             file_system.dump_catalog()
+    elif command == "visualize":
+        file_system.visualize_volume()
     elif command == "dump":
         file_system.dump_files()
     elif command == "dump-flatten":
