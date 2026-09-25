@@ -54,7 +54,6 @@ python LisaFileSystemTool.py <command> <disk image file name>
 |-------------|--------------|
 | `info`      | Prints useful information about the disk image (format, sector count, disk name, DC42 checksums, disk type/format), then prints the MDDF fields (volume name, version, slist/bitmap/catalog pointers, …) and lists the sector numbers of each predefined sector type (MDDF, bitmap, s-record, catalog, boot, loader, erased, free). |
 | `list`      | Lists all files on the volume. For file systems of version 16/17 it walks the B-tree catalog (`dump_catalog()`); for file systems of version 14/15 it scans the s-list of the flat-catalog volume (`flat_catalog_list_files()`). |
-| `visualize` | Prints a one-character-per-sector map of the whole volume, 64 sectors per line (the number in front of each line is the first sector number of that line): `B`=boot, `L`=loader, `M`=MDDF, `P`=allocation bitmap, `S`=s-record, `C`=catalog, `H`=hint (hentry), `9..2`=data sectors of the 1st..8th largest file (by the slist's filesize — the legend names each of them), `1`=data sectors of all other files, `?`=allocated sector of unknown kind (tag says free, or names a file not in the slist), `.`=free sector. Ends with a per-character sector-count summary. |
 | `dump`      | Writes the contents of every file to the host folder **`/tmp/LisaFileSystemDump/`** (created if missing), preserving the names as stored on disk. The root catalog file itself is skipped, and "empty" file names are skipped. Text files (with file names ending with ".text" ) are dumped as plain host text: the 1024-byte on-disk header page and the null page padding are stripped, and the \r new-line symbols used by LOS are converted to \n, so no further conversion is needed. |
 | `deserialize` | Finds all theft-protected files (see §5.9), asks for y/N confirmation, then rewrites each file's hint sector (so the file can be opened on any machine), and fixes up all affected checksums. |
 | `fix_dc42_checksum`| For DC42 files: checks if the data and tag checksums are correct in the DC42 header, and fixes the incorrect ones, if any. |
@@ -286,7 +285,7 @@ images), and tells you the medium:
 | Offset | Size | Field | Meaning |
 |--------|------|-------|---------|
 | 0  | 2 | `version`  | page version number |
-| 2  | 2 | `vol_id`   | volume identifier |
+| 2  | 2 | `vol_id`   | volume identifier: Set to 0 on most sectors, except set to e.g. 36 for the boot sector  and for the "loader" sectors. |
 | 4  | 2 | `file_id`  | the page's file ID (see §3.3) |
 | 6  | 2 | `dataused` | valid bytes in this page's 512 data bytes. The `0x8000` bit is a flag that is set on every tag; the count is `dataused & 0x7FFF`. |
 | 8  | 3 | `abs_num`  | absolute sector number (counted from the MDDF sector) |
@@ -687,8 +686,7 @@ formats in the host's local time zone. `0` means "never/undefined".
 | `flat_catalog_read_file_data` | Read a whole file via its tag chain, honoring `dataused` and `filesize`. |
 | `_find_rootcatalog_sfile` | Find the s-file whose hentry `ftype` is `rootcat` (2). |
 | `flat_catalog_hash` | Reimplementation of the OS's catalog hash. |
-| `dump_files` / `_dump_files_flat_catalog` | `dump` command: write all files to `/tmp/LisaFileSystemDump/`. |
-| `visualize_volume` | `visualize` command: one-character-per-sector map of the whole volume (legend, map, sector-count summary). |
+| `dump_files` / `_dump_files_flat_catalog` | `dump` command: write all files to folder `/tmp/LisaFileSystemDump/`. |
 | `get_sentry_for_sfile` | s_file_id → (hint sector, data start sector) via the slist. |
 | `_locate_hint_page_for_sfile` | Validate/relocate a (possibly stale) hintaddr using the tag (`file_id = −s_file_id`, `rel_num = 0`). |
 | `find_protected_files` / `_find_protected_files_flat_catalog` | List all theft-protected files. |
@@ -723,6 +721,9 @@ formats in the host's local time zone. `0` means "never/undefined".
 ## 9. FAQ
 
 * Can this tool remove password protections? Answer: No. Long answer: LOS allows setting up a password for specific files (select the file's icon, then use the File->Attributes of ..." menu to set/remove a password). The password is being encrypted and stored in the "hint sector" of the file and it can be printed by this too (see function `print_hint_sector_info()`). The `deserialize` tool command does not deal with these files, but this feature could be added. 
+
+* Let's say LOS was installed on a ProiFile hard drive attached at the lower port on a dual-port paralel card in Slot 1. It his information stored somewhere on the disk volume? 
+Answer: yes, it seems that the boot device number is stored in the tag of the boot sector 0, field vol_id, and also in the tags of all "loader" sectors, same field, same values. All other sectors have a vol_id=0. See LOS sources file SOURCE-FSINIT1.TEXT.unix.txt : the possible values are 0..39. What this means: if you attach a disk image on another slot / paralel port (from the one it was installed on), it may fail to boot (as we have seen "in the field").
 
 ---
 
