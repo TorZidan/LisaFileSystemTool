@@ -44,45 +44,33 @@ The document has two parts:
 
 ## 1. Using the tool
 
-### 1.1 Invocation
+### 1.1 LisaFileSystemTool.py - listing and dumping all files, deserializing LOS applications, and more
 
 ```
-python LisaFileSystemTool.py <command> <disk image file name>
+python3 LisaFileSystemTool.py <command> <disk image file name>
 ```
 
 | Command     | What it does |
 |-------------|--------------|
 | `info`      | Prints useful information about the disk image (format, sector count, disk name, DC42 checksums, disk type/format), then prints the MDDF fields (volume name, version, slist/bitmap/catalog pointers, …) and lists the sector numbers of each predefined sector type (MDDF, bitmap, s-record, catalog, boot, loader, erased, free). |
 | `list`      | Lists all files on the volume. For file systems of version 16/17 it walks the B-tree catalog (`dump_catalog()`); for file systems of version 14/15 it scans the s-list of the flat-catalog volume (`flat_catalog_list_files()`). |
+| `visualize` | Prints a one-character-per-sector map of the whole volume, 64 sectors per line. |
 | `dump`      | Writes the contents of every file to the host folder **`/tmp/LisaFileSystemDump/`** (created if missing), preserving the names as stored on disk. The root catalog file itself is skipped, and "empty" file names are skipped. Text files (with file names ending with ".text" ) are dumped as plain host text: the 1024-byte on-disk header page and the null page padding are stripped, and the \r new-line symbols used by LOS are converted to \n, so no further conversion is needed. |
+| `dump-flatten` | Like `dump`, but a '/' in a Lisa file name is replaced with '-', so all files are dumped directly into **`/tmp/LisaFileSystemDump/`** (no subfolders). |
 | `deserialize` | Finds all theft-protected files (see §5.9), asks for y/N confirmation, then rewrites each file's hint sector (so the file can be opened on any machine), and fixes up all affected checksums. |
 | `fix_dc42_checksum`| For DC42 files: checks if the data and tag checksums are correct in the DC42 header, and fixes the incorrect ones, if any. |
 
 
-### 1.2 Accepted input files
-
-* **DC42 images** (`.dc42`) — Apple DiskCopy 4.2 format; the normal way LisaEm
-  distributes floppy and hard-disk images.
-* **Raw ProFile hard-disk images**  (usually `.image`) — a sequence of `20-byte tag + 512-byte sector data`
-  records, physically stored in 5:1 interleave order (see §4.2 and §4.4).
-
-The disk image type is auto-detected: if the 2-byte `fileFormat` field at offset `0x52` is
-`0x0100` (aka DC42 magic number), the file is treated as DC42, otherwise as a raw ProFile image.
-
-Practical limits: the whole image is read into memory; files longer than
-100 000 000 bytes are rejected; DC42 images with `tagSize == 0` are rejected (the tool
-needs the tag fields to navigate the file system).
-
-### 1.3 The companion tool `LisaFileSystemToolPerFile.py` — adding, replacing and deleting files
+### 1.2 I LisaFileSystemToolPerFile.py  — adding, replacing and deleting files
 
 `LisaFileSystemToolPerFile.py` is a companion tool that **writes** files onto a disk image.
 It is a thin extension of `LisaFileSystemTool.py` (all the disk-image machinery is imported
 from there; only the add/replace/delete-specific code lives in this file). **It is experimental.**
 
 ```
-python LisaFileSystemToolPerFile.py add     <disk image file name> <host file> <lisa file name>
-python LisaFileSystemToolPerFile.py replace <disk image file name> <host file> <lisa file name>
-python LisaFileSystemToolPerFile.py delete  <disk image file name> <lisa file name>
+python3 LisaFileSystemToolPerFile.py add     <disk image file name> <host file name> <lisa file name>
+python3 LisaFileSystemToolPerFile.py replace <disk image file name> <host file name> <lisa file name>
+python3 LisaFileSystemToolPerFile.py delete  <disk image file name> <lisa file name>
 ```
 
 | Command   | What it does |
@@ -104,6 +92,19 @@ History Museum source archive appends to its text files is stripped. Together wi
 command of `LisaFileSystemTool.py` (which converts a .TEXT file back to host text), this makes
 `dump` → edit on the host → `add`/`replace` a good round trip.
 
+### 1.3 Accepted input files
+
+* **DC42 images** (`.dc42`) — Apple DiskCopy 4.2 format; the normal way LisaEm
+  distributes floppy and hard-disk images.
+* **Raw ProFile hard-disk images**  (usually `.image`) — a sequence of `20-byte tag + 512-byte sector data`
+  records, physically stored in 5:1 interleave order (see §4.2 and §4.4).
+
+The disk image type is auto-detected: if the 2-byte `fileFormat` field at offset `0x52` is
+`0x0100` (aka DC42 magic number), the file is treated as DC42, otherwise as a raw ProFile image.
+
+Practical limits: the whole image is read into memory; files longer than
+100 000 000 bytes are rejected; DC42 images with `tagSize == 0` are rejected (the tool
+needs the tag fields to navigate the file system).
 ---
 
 ## 2. The image container formats
