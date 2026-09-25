@@ -84,15 +84,18 @@ Exit codes: `0` = success; `3` = nothing was done (`add`: a file with that name 
 `1` = any other failure (including: `delete` given the name of a directory or other non-file
 catalog entry). 
 
-**Text files**: if the Lisa file name ends with ".TEXT" (case-insensitive), the host file is
-first converted to the on-disk Lisa text layout (see `LisaOsTextFileSpecification.txt`):
-line endings become \r, the text is laid out in 1024-byte pages of CR-terminated lines with an
-all-zero 1024-byte header page prepended, and the stray trailing 0xFF byte that the Computer
-History Museum source archive appends to its text files is stripped. Together with the `dump`
+### 1.3 Lisa Text File format
+
+If the Lisa file name ends with ".TEXT" (case-insensitive), the code assumes that it's a text file.
+Text files are stored in a special way on the Lisa file system (see [LisaOsTextFileSpecification.txt](./LisaOsTextFileSpecification.txt)),
+so, unlike binary files, there is some extra work we need to do when adding/replacing text files: the host text file is
+converted to the on-disk Lisa text layout : line endings become \r, the text is laid out in 1024-byte "pages" of \r-terminated lines with an
+all-zero 1024-byte header "page" prepended, and the stray trailing 0xFF byte that the Computer
+History Museum Lisa source archive text files have is stripped (if any). Together with the `dump`
 command of `LisaFileSystemTool.py` (which converts a .TEXT file back to host text), this makes
 `dump` → edit on the host → `add`/`replace` a good round trip.
 
-### 1.3 Accepted input files
+### 1.4 Accepted input files
 
 * **DC42 images** (`.dc42`) — Apple DiskCopy 4.2 format; the normal way LisaEm
   distributes floppy and hard-disk images.
