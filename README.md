@@ -160,7 +160,7 @@ sector n data    : offset  interleave5(n) * 532 + 20
 
 ---
 
-## 3. The boot sector and locating the MDDF
+## 3. The Boot sector and locating the MDDF (Media Descriptor Data File)
 
 Sector 0 is the boot sector. Two layouts exist (see
 `LISA_OS/OS/source-LDEQU.TEXT.unix.txt`; the "Write Boot Tracks" utility, PWBT in
@@ -184,15 +184,17 @@ tool scans the tags of **all** sectors for `file_id 0x0001` and takes the first 
 
 ---
 
-## 4. The MDDF (Media Descriptor Data File)
+## 4. The MDDF (Media Descriptor Data File) sector
 
-The MDDF (tag `FILEID_MDDF` = `0x0001`) is created when the volume is initialized and
+The MDDF (Media Descriptor Data File) data structure is created when the volume is first initialized; it
 describes everything about the media: size, page layout, and where the file-system
-structures live. It occupies one (or more) sector(s); the tool reads the first one.
-Field offsets are the ones used by the tool (`MDDF_FIELD_DEFINITIONS`); they were
-adjusted against real Lisa profile disk images because the offsets in the published
+structures live. 
+It occupies one sector, but may be "backed up" onto other sectors; the tool reads the first one.
+Its tag has a file_id of `FILEID_MDDF` = `0x0001`.
+The field offsets used by the tool (in `MDDF_FIELD_DEFINITIONS`) were
+discovered from real Lisa profile disk images, because the offsets in the published
 Pascal record (`SOURCE-VMSTUFF.TEXT.unix.txt`) do not quite match real images. Fields
-marked "verified" in the source comments are the ones the tool actually relies on.
+marked "verified" in the source comments are the ones the tool actually relies on / modifies.
 
 Key fields (byte offsets within the MDDF sector):
 
@@ -613,7 +615,7 @@ Where, on disk, is the file protection stored? Each file has a "hint sector numb
 
 The "deserialize" command scans all files on the disk image, finds the ones whose **`protected`**  byte is set, and resets it to zero, and also writes "all-zeroes" in the 4-bytes **`machine_id`**. After that, the file will no-longer be protected, so it can be copied-to and run just anywhere (on any Lisa).
 
-How does a "virgin" (never used) LOS floppy disk look like? Consider the LisaDraw 3.1 installation floppy disk. It contains one protected file named '{T4}obj' (the LisaDraw executable) with machine_id:0 (0x00000000) = AppleNet '00000000'. When copying the LisaDraw from from the floppy to your hard disk (via the usual "duplicate then drag"), the special `machine_id:0 + protected:0` is what prompts LOS to pop the message `The Lisa is about to make the first copy of LisaDraw. Afterwards, this copy, and all future copies, can be used only on this Lisa. Is this what you want?`. Once you complete copying the file, both files (the one on the floppy disk and the one on your hard disk) will be updated to contain your Lisa's AppleNet id. And this is why the LisaEm emulator has an AppleNet id of 0 (see it in File->Preferences) : when this file is being copied on LisaEm, LOS will update the file's AppleNet id from 0 to 0, which basically leaves the disk virgin, ready to be used on any Lisa. Clever! 
+How does a "virgin" (never used) LOS floppy disk look like? Consider the LisaDraw 3.1 installation floppy disk. It contains one protected file named '{T4}obj' (the LisaDraw executable) with machine_id:0 (0x00000000) = AppleNet '00000000'. When copying the LisaDraw from from the floppy to your hard disk (via the usual "duplicate then drag"), the special `machine_id:0 + protected:0` is what prompts LOS to pop the message `The Lisa is about to make the first copy of LisaDraw. Afterwards, this copy, and all future copies, can be used only on this Lisa. Is this what you want?`. Once you complete copying the file, both files (the one on the floppy disk and the one on your hard disk) will be updated to contain your Lisa's AppleNet id. And this is why the LisaEm emulator has an AppleNet id of 0 (see it in File->Preferences) : when this file is being copied on LisaEm, LOS will update the file's AppleNet id from 0 to 0, which basically leaves the disk virgin, ready to be used on any Lisa. [Clever](https://lisalist2.com/index.php?topic=65.0)! 
 
 Note: In prior literature (by others), "deserialization" meant "reset the machine_id of a protected file to 0". Here it means "reset the machine_id of a protected file to 0 and set the protected flag to 0", which basically turns a protected file into a regular LOS file.
 
@@ -668,11 +670,24 @@ The tool's `to_uint16/32_big_endian()` helpers do the decoding.
 
 ### 6.3 Dates
 
+Lisa stores dates on the file system in the DT_* fields in the MDDF sector, and in each file's hint/hentry DTC/DTA/DTM/DTB/DTS fields.
+These fields are 4-bytes long.
+
 A Lisa timestamp is the number of **seconds since the midnight prior to 1 January
 1901** (not 1900!), in GMT (`libhw-TIMERS.TEXT.unix.txt`; `baseyear = 1901` in
 `source-TIMEMGR.TEXT.unix.txt`). The OS kept times in GMT and converted to local time
-only for display. `format_date()` subtracts 2177452800 (the 1901→1970 offset) and
-formats in the host's local time zone. `0` means "never/undefined".
+only for display. 
+  * This needs more investigation: how is "the system's local timezone" edited and where is it stored on disk?
+    It is possible that the keyboard layout (e.g. French) is used to determine the the system's local timezone?
+
+The tool's `format_date()` function assumes that the date was stored in GMT/UTC timezone, so it subtracts 2177452800 (the 1901→1970 offset) and
+formats it (converts it) in the host's local time zone. A value of `0` means "never set/undefined".
+
+How do you set the clock in LOS? Answer: in a non-intuitive way: Launch the "Clock" application, select e.g. the year field, and type a new value on the keyboard. There is no option for setting the user's time zone.
+
+The maximum possible date is: 2037-02-06 06:28:15 GMT (i.e. value 0xFFFFFFFF = 4,294,967,295 seconds), but the "Clock" does not let you enter a date later than ????.
+
+Online articles suggest that LOS rolls over its clock back to 01/01/80 after passing 12/31/95. now that the Lisa sources are available, this can be fixed to allow modern dates, but still, the "2037-02-06 06:28:15" doomsday will inevitably come. 
 
 ---
 
