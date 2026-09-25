@@ -2,8 +2,8 @@
 #
 # dump_all_profile_images.sh
 #
-# Invokes the dc42_dump.py tool for every file in the lisaem ProfileImages folder:
-#     python3 dc42_dump.py <filename>
+# Invokes the LisaFileSystemTool.py tool for every file in the /tmp folder:
+#     python3 LisaFileSystemTool.py dump <filename>
 #
 # Usage:
 #     ./dump_all_profile_images.sh [folder]

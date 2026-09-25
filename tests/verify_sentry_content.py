@@ -41,8 +41,8 @@ print(f"\nDiff.obj data  (9216 bytes) md5-ish: {sum(d1):#x} first16={d1[:16].hex
 print(f"Diff2.obj data (9216 bytes) md5-ish: {sum(d2):#x} first16={d2[:16].hex(' ')}")
 print(f"Data pages identical: {d1 == d2}")
 
-with open("/tmp/dc42-dump/Diff.obj","rb") as f:
+with open("/tmp/LisaFileSystemDump/Diff.obj","rb") as f:
     host = f.read()
-print(f"Host /tmp/dc42-dump/Diff.obj: {len(host)} bytes, sum={sum(host):#x}")
+print(f"Host /tmp/LisaFileSystemDump/Diff.obj: {len(host)} bytes, sum={sum(host):#x}")
 print(f"Host == Diff.obj on-disk: {host == d1}")
 print(f"Host == Diff2.obj on-disk: {host == d2}")

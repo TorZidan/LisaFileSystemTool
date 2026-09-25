@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from io import BufferedReader, BytesIO
 from typing import BinaryIO, List
 import os
+import psutil
 import struct
 import sys
 
@@ -409,6 +410,54 @@ class InMemoryFileSystem:
                     f"The file system version {self._fs_version} is outside of the known range 14..17."
                     " This program does not work with this version. Cannot continue, exiting!"
                 )
+
+    def _is_disk_image_file_currently_open_by_some_other_process(self) -> bool:
+        """
+        Check if the disk image file (self._file_name) is currently open by any
+        running process.
+
+        Works on Linux, macOS, and Windows, but note:
+        - Requires elevated privileges (root/admin) to see files opened
+            by processes you don't own; otherwise those processes are skipped.
+        - On Windows, checking open files can occasionally be slow for
+            certain processes.
+
+        Returns:
+            True if the file is open by at least one process, False otherwise.
+
+        """
+        target_path = os.path.abspath(self._file_name)
+        for proc in psutil.process_iter(['pid', 'name']):
+            try:
+                for f in proc.open_files():
+                    if os.path.abspath(f.path) == target_path:
+                        return True
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+            except Exception:
+                # Defensive catch-all for platform-specific quirks
+                # (e.g., transient WinError access issues)
+                continue
+        return False
+
+    def _confirm_proceed_if_disk_image_is_open_by_other_process(self) -> bool:
+        """
+        Check if the disk image file is currently open by some other process. If it
+        is, warn the user (a concurrent process may hold stale copies of the image
+        in memory or write to it as well, so modifying it now is risky) and ask
+        whether to continue anyway.
+
+        Returns:
+            True to proceed with the operation, False to abort it.
+        """
+        if not self._is_disk_image_file_currently_open_by_some_other_process():
+            return True
+        print(
+            f"\nWARNING: The disk image file '{self._file_name}' appears to be currently open"
+            " by some other process. Modifying it now may conflict with that process."
+        )
+        answer = input("Do you want to continue anyway? [y/N] ")
+        return answer.strip().lower() in ("y", "yes")
 
     def print_extra_info(self):
         self.print_mddf_sector_info()
@@ -1389,7 +1438,7 @@ class InMemoryFileSystem:
             print_bytes_in_hex_and_ascii(bitmap_sector_bytes)
 
     def _dump_destination(self, file_name: str, flatten: bool = False):
-        """Compute the host file path a Lisa file is dumped to under /tmp/dc42-dump.
+        """Compute the host file path a Lisa file is dumped to under /tmp/LisaFileSystemDump.
 
         By default a '/' in the Lisa file name becomes a host folder separator: a
         file named 'apbg/BG1A.TEXT' is written into the apbg/ subfolder of the dump
@@ -1399,7 +1448,7 @@ class InMemoryFileSystem:
         Returns the full output path, or None if the (possibly flattened) name would
         escape the dump folder (a leading '/' or a '..' component) and must be skipped.
         """
-        output_root = "/tmp/dc42-dump"
+        output_root = "/tmp/LisaFileSystemDump"
         host_name = file_name.replace("/", "-") if flatten else file_name
         output_filename = os.path.normpath(os.path.join(output_root, host_name))
         if not output_filename.startswith(output_root + os.sep):
@@ -1408,10 +1457,10 @@ class InMemoryFileSystem:
 
     def dump_files(self, flatten: bool = False):
         """
-        Dumps all files from the dc42 image to the host file system, into folder /tmp/dc42_dump (it creates the folder if not present).
+        Dumps all files from the dc42 image to the host file system, into folder /tmp/LisaFileSystemDump (it creates the folder if not present).
         By default it preserves the directory structure: a '/' in a Lisa file name
         becomes a subfolder. With flatten=True, a '/' is replaced with '-' instead, so
-        all files are dumped into the single /tmp/dc42-dump folder (the 'dump-flatten'
+        all files are dumped into the single /tmp/LisaFileSystemDump folder (the 'dump-flatten'
         command). Does not attempt to rename the files in any other way.
 
         How it works:
@@ -2703,7 +2752,7 @@ class InMemoryFileSystem:
 
     def _dump_files_flat_catalog(self, flatten: bool = False):
         """fs_version 14/15 variant of dump_files(): write the contents of every file in the
-        slist to /tmp/dc42-dump/, following each file's tag chain (see
+        slist to folder /tmp/LisaFileSystemDump, following each file's tag chain (see
         flat_catalog_read_file_data()). The rootcatalog itself is not dumped as a file.
         By default a '/' in a file name becomes a subfolder; with flatten=True it is
         replaced with '-' (see dump_files() and _dump_destination()).
@@ -2712,7 +2761,7 @@ class InMemoryFileSystem:
         the CR line endings are converted to host "\n" (see
         lisa_text_file_to_host_text()).
         """
-        output_dir = "/tmp/dc42-dump"
+        output_dir = "/tmp/LisaFileSystemDump"
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
             print(f"Created directory: {output_dir}")
@@ -3488,12 +3537,12 @@ if __name__ == "__main__":
         )
         print("  list           List the files on the disk image.")
         print(
-            "  dump           Dump all files from the disk image into folder /tmp/dc42-dump"
+            "  dump           Dump all files from the disk image into folder /tmp/LisaFileSystemDump"
             " (a '/' in a Lisa file name becomes a subfolder there)."
         )
         print(
             "  dump-flatten   Like 'dump', but a '/' in a Lisa file name is replaced with a '-'"
-            ", so all files are dumped into the single /tmp/dc42-dump folder."
+            ", so all files are dumped into the /tmp/LisaFileSystemDump folder (no subfolders are being created)."
         )
         print(
             "                 Note: two file names that differ only by '/' vs '-' (e.g. 'a/b.txt'"
@@ -3532,7 +3581,10 @@ if __name__ == "__main__":
 
     if command == "deserialize":
         try:
-            file_system.remove_file_protection()
+            if file_system._confirm_proceed_if_disk_image_is_open_by_other_process():
+                file_system.remove_file_protection()
+            else:
+                print("Aborted by user; the disk image was not modified.")
         except EOFError:
             # No interactive terminal (stdin closed/redirected): don't prompt, just skip.
             print(

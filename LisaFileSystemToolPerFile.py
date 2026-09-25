@@ -2749,6 +2749,21 @@ if __name__ == "__main__":
         )
         sys.exit(1)
 
+    # Every command below modifies the disk image on disk, so first make sure
+    # the image file is not currently open by some other process; if it is,
+    # warn the user and only continue if they explicitly agree.
+    try:
+        proceed = file_system._confirm_proceed_if_disk_image_is_open_by_other_process()
+    except EOFError:
+        # No interactive terminal (stdin closed/redirected): don't prompt, just skip.
+        print(
+            "No interactive terminal for the confirmation prompt; the disk image was not modified."
+        )
+        sys.exit(1)
+    if not proceed:
+        print("Aborted by user; the disk image was not modified.")
+        sys.exit(1)
+
     # Every command method returns the exit code to use directly:
     # 0 = success, 3 = no action was needed (add: a file with that name
     # already exists / replace and delete: no file with that name on the

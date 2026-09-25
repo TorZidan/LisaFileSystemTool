@@ -54,7 +54,7 @@ python LisaFileSystemTool.py <command> <disk image file name>
 |-------------|--------------|
 | `info`      | Prints useful information about the disk image (format, sector count, disk name, DC42 checksums, disk type/format), then prints the MDDF fields (volume name, version, slist/bitmap/catalog pointers, …) and lists the sector numbers of each predefined sector type (MDDF, bitmap, s-record, catalog, boot, loader, erased, free). |
 | `list`      | Lists all files on the volume. For file systems of version 16/17 it walks the B-tree catalog (`dump_catalog()`); for file systems of version 14/15 it scans the s-list of the flat-catalog volume (`flat_catalog_list_files()`). |
-| `dump`      | Writes the contents of every file to the host folder **`/tmp/dc42-dump/`** (created if missing), preserving the names as stored on disk. The root catalog file itself is skipped, and "empty" file names are skipped. Text files (with file names ending with ".text" ) are dumped as plain host text: the 1024-byte on-disk header page and the null page padding are stripped, and the \r new-line symbols used by LOS are converted to \n, so no further conversion is needed. |
+| `dump`      | Writes the contents of every file to the host folder **`/tmp/LisaFileSystemDump/`** (created if missing), preserving the names as stored on disk. The root catalog file itself is skipped, and "empty" file names are skipped. Text files (with file names ending with ".text" ) are dumped as plain host text: the 1024-byte on-disk header page and the null page padding are stripped, and the \r new-line symbols used by LOS are converted to \n, so no further conversion is needed. |
 | `deserialize` | Finds all theft-protected files (see §5.9), asks for y/N confirmation, then rewrites each file's hint sector (so the file can be opened on any machine), and fixes up all affected checksums. |
 | `fix_dc42_checksum`| For DC42 files: checks if the data and tag checksums are correct in the DC42 header, and fixes the incorrect ones, if any. |
 
@@ -502,7 +502,7 @@ Both catalog versions (Flat or B-Tree) converge on the same mechanics, driven by
 
 All data pages of file *N* are tagged `+N`, so an alternative way is to find all sectors whose tag carries the file's id, sort them and read them.
 
-The `dump` commands reads all files (into folder /tmp/dc42-dump). Text files (with file names ending with ".text" ) are dumped as plain host text: the 1024-byte on-disk header page and the null page padding are stripped, and the \r new-line symbols used by LOS are converted to \n, so no further conversion is needed.
+The `dump` commands reads all files (into folder /tmp/LisaFileSystemDump). Text files (with file names ending with ".text" ) are dumped as plain host text: the 1024-byte on-disk header page and the null page padding are stripped, and the \r new-line symbols used by LOS are converted to \n, so no further conversion is needed.
 
 ### 5.6 File names
 
@@ -686,7 +686,7 @@ formats in the host's local time zone. `0` means "never/undefined".
 | `flat_catalog_read_file_data` | Read a whole file via its tag chain, honoring `dataused` and `filesize`. |
 | `_find_rootcatalog_sfile` | Find the s-file whose hentry `ftype` is `rootcat` (2). |
 | `flat_catalog_hash` | Reimplementation of the OS's catalog hash. |
-| `dump_files` / `_dump_files_flat_catalog` | `dump` command: write all files to `/tmp/dc42-dump/`. |
+| `dump_files` / `_dump_files_flat_catalog` | `dump` command: write all files to `/tmp/LisaFileSystemDump/`. |
 | `get_sentry_for_sfile` | s_file_id → (hint sector, data start sector) via the slist. |
 | `_locate_hint_page_for_sfile` | Validate/relocate a (possibly stale) hintaddr using the tag (`file_id = −s_file_id`, `rel_num = 0`). |
 | `find_protected_files` / `_find_protected_files_flat_catalog` | List all theft-protected files. |
@@ -710,7 +710,7 @@ formats in the host's local time zone. `0` means "never/undefined".
   tool recovers by rescanning tags, but a warning is printed.
 * **Stale smallmaps** can occur after a file is shrunk — use the tag chain, not the
   smallmap, for data.
-* The output directory `/tmp/dc42-dump/` is hard-coded; filenames are used verbatim.
+* The output directory `/tmp/LisaFileSystemDump/` is hard-coded; filenames are used verbatim.
 * `deserialize` needs an interactive terminal for the confirmation prompt; without one it
   aborts safely.
 * The whole image must fit in memory (and be ≤ 100 MB).
