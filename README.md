@@ -685,9 +685,7 @@ formats it (converts it) in the host's local time zone. A value of `0` means "ne
 
 How do you set the clock in LOS? Answer: in a non-intuitive way: Launch the "Clock" application, select e.g. the year field, and type a new value on the keyboard. There is no option for setting the user's time zone.
 
-The maximum possible date is: 2037-02-06 06:28:15 GMT (i.e. value 0xFFFFFFFF = 4,294,967,295 seconds), but the "Clock" does not let you enter a date later than ????.
-
-Online articles suggest that LOS rolls over its clock back to 01/01/80 after passing 12/31/95. now that the Lisa sources are available, this can be fixed to allow modern dates, but still, the "2037-02-06 06:28:15" doomsday will inevitably come. 
+The maximum possible date is: 2037-02-06 06:28:15 GMT (i.e. value 0xFFFFFFFF = 4,294,967,295 seconds), but the "Clock" does not let you enter any year outside of 81..95, so the maximum date you can enter is 1995-12-31. Online articles suggest that LOS rolls over its clock back to 1980-01-01 after passing 1995-12-31. Whyyyy! Now that the Lisa sources are available, this can be fixed to allow modern dates, but still, the "2037-02-06 06:28:15" doomsday will inevitably come.
 
 ---
 
@@ -695,7 +693,7 @@ Online articles suggest that LOS rolls over its clock back to 01/01/80 after pas
 
 | Method | Purpose |
 |--------|---------|
-| `FileSystem.__init__` | Load the image, detect DC42 vs raw, validate sizes and checksums, locate the MDDF (boot sector first, tag scan as fallback), read `fsversion` (must be 14..17). |
+| `InMemoryFileSystem.__init__` | Load the image in memory, detect DC42 vs raw, validate sizes and checksums, locate the MDDF (boot sector first, tag scan as fallback), read `fsversion` (must be 14..17). |
 | `print_extra_info` / `print_mddf_sector_info` | `info` command: MDDF fields + list of sectors per file-ID type. |
 | `print_sector_tags` / `pretty_print_tags_for_sector` | Hex/annotated dump of raw tag bytes. |
 | `print_hint_sector_info(n)` | Full annotated decode of one hint sector (hentry + smallmap + protection summary). |
