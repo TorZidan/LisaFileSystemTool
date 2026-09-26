@@ -109,6 +109,22 @@ Practical limits: the whole disk image file is read into memory; files longer th
 100 000 000 bytes are rejected; DC42 images with `tagSize == 0` are rejected (the tool
 needs the tag fields to navigate the file system).
 
+### 1.5 Companion tool: LisaSerialNumberTool.py - prints/decodes Lisa serial numbers
+
+`LisaSerialNumberTool.py` is a standalone Python tool for decoding the Apple Lisa VSROM
+(Video State ROM) serial number, given as the 32-character hex string (16 bytes, "32 nibbles")
+used by the LisaEm emulator (File -> Preferences). It prints a human-readable report: the two
+16-byte serial lines as shown by the Lisa in service mode (addresses 0x240 and 0x250), the
+decoded plant / year / day / serial-number fields, the 8-digit BCD AppleNet number (plus the
+`machine_id` derived from it), and the result of the checksum replicated from the boot ROM's
+SERNUM routine. If the checksum is invalid, it also prints a "corrected" serial number whose
+checksum passes (the 3 BCD checksum nibbles are rewritten with the computed checksum).
+
+```
+python3 LisaSerialNumberTool.py <serial number>
+# e.g. python3 LisaSerialNumberTool.py FF028308104050FF0010163504700000
+```
+
 ---
 
 ## 2. The image container formats
@@ -766,6 +782,7 @@ Answer: yes, it seems that the boot device number is stored in the tag of the bo
   (<https://www.discferret.com/wiki/Apple_DiskCopy_4.2>).
 * Lisa serial number format at https://lisalist2.com/index.php?topic=313.0
 * stepleton/bootloader `dc42_build_bootable_disk.py` — DC42 checksum algorithm
+* Lisa Computer Tool Deserialization Documents by David Craig at http://www.applerepairmanuals.com/lisa/deserial/pg02.html
   (<https://github.com/stepleton/bootloader>).
 * LOS/Workshop text file format at https://www.bitsavers.org/pdf/apple/lisa/toolkit_3.0/Package_2_Examples/17_Lisa_Development_System_Internals_Documentation_Feb84.pdf
   , pages 37 and 38.
