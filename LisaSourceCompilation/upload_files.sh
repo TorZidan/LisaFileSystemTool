@@ -14,8 +14,8 @@
 #    python3 patch_files.py Lisa_Source . It should print "Successfully applied 248/248 patches".
 # 5. cd ... the folder where this shell script is.
 # 6. run this script: ./upload_files.sh <folder-with-Lisa_Source-files>
-#    It will "upload" 862 files onto the disk image. Observe the final message, it should print 
-#    "Done: 862 file(s) added, 0 already present, 0 failure(s)" the first time you run it.
+#    It will "upload" 861 files onto the disk image. Observe the final message, it should print 
+#    "Done: 861 file(s) added, 0 already present, 0 failure(s)" the first time you run it.
 # 7. There you have it. Mount the LOS_Compilation_Base_original.image disk image in the LisaEm emulator
 #    or on a real Lisa using an ESProfile hardware emulator,
 #    boot into Workshop and run "<ALEX/MAKE/ALL_NODISKS2" to build everything except Lisa Guide.
@@ -84,7 +84,7 @@ fail=0
 # The "replace" command does not have such bug, and is able to successfully replace the file.
 python3 ../LisaFileSystemToolPerFile.py replace "$IMAGE" system.os system.os ; case $? in 0) ok=$((ok+1));; 3) skip=$((skip+1));; *) fail=$((fail+1));; esac
 
-# Some build macros:
+# Some build macros, in addition to the ones already present on the disk image:
 python3 ../LisaFileSystemToolPerFile.py add "$IMAGE" MAKE-ALL_NODISKS2.TEXT ALEX/MAKE/ALL_NODISKS2.TEXT ; case $? in 0) ok=$((ok+1));; 3) skip=$((skip+1));; *) fail=$((fail+1));; esac
 python3 ../LisaFileSystemToolPerFile.py add "$IMAGE" MAKE-CLEAN.TEXT ALEX/MAKE/CLEAN.TEXT ; case $? in 0) ok=$((ok+1));; 3) skip=$((skip+1));; *) fail=$((fail+1));; esac
 
