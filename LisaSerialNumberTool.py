@@ -10,6 +10,9 @@
 # Usage:   python3 LisaSerialNumberTool.py <serial number>                                        #
 # Example: python3 LisaSerialNumberTool.py ff028308104050ff0010163504700000                       #
 #                                                                                                 #
+# Why is this tool here? It prints the machine_id (derived from the AppleNet number), which is    #
+# used by LOS for file copy protection (aka "serialization").                                     #
+#                                                                                                 #
 # Author: TorZidan                                                                                #
 # Date: Sept 25, 2026                                                                             #
 # License: Published under the GNU General Public License v3.0.                                   #

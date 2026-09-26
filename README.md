@@ -116,8 +116,8 @@ needs the tag fields to navigate the file system).
 used by the LisaEm emulator (File -> Preferences). It prints a human-readable report: the two
 16-byte serial lines as shown by the Lisa in service mode (addresses 0x240 and 0x250), the
 decoded plant / year / day / serial-number fields, the 8-digit BCD AppleNet number (plus the
-`machine_id` derived from it), and the result of the checksum replicated from the boot ROM's
-SERNUM routine. If the checksum is invalid, it also prints a "corrected" serial number whose
+`machine_id` derived from it), and the checksum built into the serial number. 
+If the checksum is invalid, it also prints a "corrected" serial number whose
 checksum passes (the 3 BCD checksum nibbles are rewritten with the computed checksum).
 
 ```
@@ -612,9 +612,9 @@ The smallmap is a **display optimization only** — to actually read the file yo
 the tag `fwd_link` chain from the slist's `fileaddr`. It can go stale after a file is
 shrunk.
 
-### 5.9 Protected files (theft protection) and removing the protection (deserialization)
+### 5.9 Copy-protected files and removing the protection (deserialization)
 
-Now the fun part: how disk protection works in LOS.
+Now the fun part: how file copy protection works in LOS.
 
 LOS uses DRM (digital rights management) (aka "serialization") when copying some of its tools (e.g. LisaDraw) from an installation floppy disk onto a hard drive,
 to prevent you using that floppy disk onto multiple Lisas. How it works: when you copy an app (e.g. LisaDraw) from a floppy disk to your Lisa's hard drive for the very first time, the Lisa will prompt you that you're about to serialize that disk to your Lisa, and if you choose to proceed, that app will work only on this Lisa. What happens is: LOS will write your Lisa's "AppleNet" number to both the file on the floppy disk and the file on your hard drive. Now, if you try to install (copy) the file from this floppy onto another Lisa, it will do it, but, when you try to launch the file, it will refuse to launch it, because the file was "serialized" on another Lisa. Similarly, if you connect your ProFile hard disk to another Lisa and try to run LisaDraw from it, you will get the same error.
