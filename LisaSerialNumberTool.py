@@ -2,8 +2,13 @@
 ###################################################################################################
 # LisaSerialNumberTool.py is a standalone Python tool for decoding Apple Lisa serial numbers,     #
 # as found in the LisaEm emulator. Read below for more info.                                      #
-# Usage: python LisaSerialNumberTool.py <serial number>                                           #
-# Example: python LisaSerialNumberTool.py FF000000000000FF0010000100205D2C                        #
+#                                                                                                 #
+# Every Apple Lisa computer has a unique serial number, stored in the VSROM (Video state ROM) on  #
+# the CPU board (and printed on a label under the screen). It can be retrieved in "service mode", #
+#  read below. This tool decodes it.                                                              #
+#                                                                                                 #
+# Usage: python3 LisaSerialNumberTool.py <serial number>                                          #
+# Example: python3 LisaSerialNumberTool.py FF000000000000FF0010000100205D2C                       #
 #                                                                                                 #
 # Author: TorZidan                                                                                #
 # Date: Sept 25, 2026                                                                             #
@@ -154,7 +159,7 @@ def decode_16_byte_serial(serial_str: str):
 def main():
     """CLI entry point: decode the serial number given as the first command-line argument."""
     if len(sys.argv) != 2:
-        print("Usage: python LisaSerialNumberTool.py <Apple Lisa serial number>")
+        print("Usage: python3 LisaSerialNumberTool.py <Apple Lisa serial number>")
         print(
             "The serial number is the 'compressed' 16-byte (32 hex character), as used by the LisaEm emulator, e.g. ff000000000000ff0000000000000000. See more info in the code."
         )
