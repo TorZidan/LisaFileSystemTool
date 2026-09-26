@@ -23,7 +23,7 @@
 # License: Published under the GNU General Public License v3.0.                                     #
 #####################################################################################################
 
-from typing import List
+from typing import List, Optional
 import os
 import struct
 import sys
@@ -1531,14 +1531,14 @@ class _LocatedFile:
 
     def __init__(
         self,
-        status,
-        sfile=None,
-        leaf=None,
-        idx=None,
-        rec=None,
-        count=0,
-        cetype=None,
-        slot=None,
+        status: str,
+        sfile: Optional[int] = None,
+        leaf: Optional[_BTreeNode] = None,
+        idx: Optional[int] = None,
+        rec: Optional[bytes] = None,
+        count: int = 0,
+        cetype: Optional[int] = None,
+        slot: Optional[int] = None,
     ):
         self.status = status
         self.sfile = sfile
