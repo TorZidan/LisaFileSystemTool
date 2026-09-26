@@ -55,38 +55,34 @@ def decode_16_byte_serial(serial_str: str):
             f"serial_as_32_bytes must be 32 bytes, got {len(serial_as_32_bytes)}"
         )
 
-    plant: int = ((serial_as_32_bytes[0x02] & 0x0F) << 4) | (
-        serial_as_32_bytes[0x03] & 0x0F
-    )
-    year: int = ((serial_as_32_bytes[0x04] & 0x0F) << 4) | (
-        serial_as_32_bytes[0x05] & 0x0F
-    )
+    plant: int = ((serial_as_32_bytes[0x02]) << 4) | (serial_as_32_bytes[0x03])
+    year: int = ((serial_as_32_bytes[0x04]) << 4) | (serial_as_32_bytes[0x05])
     day: int = (
-        ((serial_as_32_bytes[0x06] & 0x0F) << 8)
-        | ((serial_as_32_bytes[0x07] & 0x0F) << 4)
-        | (serial_as_32_bytes[0x08] & 0x0F)
+        ((serial_as_32_bytes[0x06]) << 8)
+        | ((serial_as_32_bytes[0x07]) << 4)
+        | (serial_as_32_bytes[0x08])
     )
 
     # Serial number possible range: 0..65535 (0xFFFF)
     serial_number: int = (
-        ((serial_as_32_bytes[0x09] & 0x0F) << 12)
-        | ((serial_as_32_bytes[0x0A] & 0x0F) << 8)
-        | ((serial_as_32_bytes[0x0B] & 0x0F) << 4)
-        | (serial_as_32_bytes[0x0C] & 0x0F)
+        ((serial_as_32_bytes[0x09]) << 12)
+        | ((serial_as_32_bytes[0x0A]) << 8)
+        | ((serial_as_32_bytes[0x0B]) << 4)
+        | (serial_as_32_bytes[0x0C])
     )
 
     # Applenet number:
     prefix: int = (
-        ((serial_as_32_bytes[0x10] & 0x0F) << 8)
-        | ((serial_as_32_bytes[0x11] & 0x0F) << 4)
-        | (serial_as_32_bytes[0x12] & 0x0F)
+        ((serial_as_32_bytes[0x10]) << 8)
+        | ((serial_as_32_bytes[0x11]) << 4)
+        | (serial_as_32_bytes[0x12])
     )
     net: int = (
-        ((serial_as_32_bytes[0x13] & 0x0F) << 16)
-        | ((serial_as_32_bytes[0x14] & 0x0F) << 12)
-        | ((serial_as_32_bytes[0x15] & 0x0F) << 8)
-        | ((serial_as_32_bytes[0x16] & 0x0F) << 4)
-        | (serial_as_32_bytes[0x17] & 0x0F)
+        ((serial_as_32_bytes[0x13]) << 16)
+        | ((serial_as_32_bytes[0x14]) << 12)
+        | ((serial_as_32_bytes[0x15]) << 8)
+        | ((serial_as_32_bytes[0x16]) << 4)
+        | (serial_as_32_bytes[0x17])
     )
     # the 8-digit BCD AppleNet serial number: 3-digit prefix + 5-digit number
     applenet: str = "".join(f"{v}" for v in serial_as_32_bytes[0x10:0x18])
@@ -148,7 +144,7 @@ def decode_16_byte_serial(serial_str: str):
         "\nIf you were to print this serial number on a Lisa in service mode, it would look like this:\n"
         f"00000240: {serial_at_address_240}\n"
         f"00000250: {serial_at_address_250}\n\n"
-        # Note: we print these values in hex format below, and yey they come out just right:
+        # Note: we print these values in hex format below, and yet they come out just right:
         f"Decoded: Your Lisa was built in Apple Plant #{plant:x} on the {day:x} day of 19{year:x} with serial #{serial_number:04x}\n\n"
         f"AppleNet Number: {prefix:03x}-{net:05x} (machine_id {machine_id} / {machine_id:#010x})\n\n"
         f"{checksum_report}"
