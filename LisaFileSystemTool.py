@@ -1919,7 +1919,7 @@ class InMemoryFileSystem:
         if ranked_files:
             for rank, (s_file_id, size) in enumerate(ranked_files[:8]):
                 name = file_names.get(s_file_id, "?")
-                print(f"   {9 - rank} = File '{name}' ({size} bytes, s_file_id {s_file_id}),")
+                print(f"   {9 - rank} = File'{name}' ({size} bytes, s_file_id {s_file_id}),")
         else:
             print("   9..2 = data sectors of the largest files (no files with data found in the slist),")
         if len(ranked_files) > 8:
@@ -3568,6 +3568,9 @@ def format_date(date_as_int: int) -> str:
     and converted GMT -> local time for display (Convert_Time in timemgr,
     LISA_OS/GUIDE_APIM/apim-tsettime.TEXT.unix.txt), which we approximate here
     with the system's local timezone.
+    
+    But how is "the system's local timezone" edited and where is it stored?
+    Is it possible that the keyboard layout (e.g. French) is used to determine the the system's local timezone?
     """
     if date_as_int == 0:
         return "undefined"
