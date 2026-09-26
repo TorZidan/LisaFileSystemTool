@@ -5,9 +5,9 @@
 #                                                                                                 #
 # Every Apple Lisa computer has a unique serial number, stored in the VSROM (Video state ROM) on  #
 # the CPU board (and printed on a label under the screen). It can be retrieved in "service mode", #
-#  read below. This tool decodes it.                                                              #
+# read below. This tool decodes it.                                                               #
 #                                                                                                 #
-# Usage: python3 LisaSerialNumberTool.py <serial number>                                          #
+# Usage:   python3 LisaSerialNumberTool.py <serial number>                                        #
 # Example: python3 LisaSerialNumberTool.py FF000000000000FF0010000100205D2C                       #
 #                                                                                                 #
 # Author: TorZidan                                                                                #
@@ -33,7 +33,7 @@ def decode_16_byte_serial(serial_str: str):
     Click on "Display Mem". When prompted for "Address?", type 240, and click enter. When prompted for "Count?", type 20. You will then receive two lines of code e.g.
     00000240: 0F0F 0002 0803 0008 0100 0400 0500 0F0F
     00000250: 0000 0100 0106 0305 0004 0700 0000 0000
-    , which gives us 32 bytes. Notice that each byte starts with "0", so you can compress these "in your brain" into 16 bytes : FF028308104050FF0010163504700000.
+    , which gives us 32 bytes. Notice that each byte starts with "0", so you can discard them and compress the remaining nibbles into 16 bytes : FF028308104050FF0010163504700000.
     Finally, If you feed this string to this function, you will get what you were looking for :)
 
     As we can see from the code, the serial number contains a checksum. Interesting.
