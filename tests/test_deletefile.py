@@ -27,7 +27,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from LisaFileSystemTool import InMemoryFileSystem
-from LisaFileSystemToolPerFile import FileSystemWithAddFile, BTREE_BAD, BTREE_LEAF
+from LisaFileSystemToolPerFile import FileSystemWithPerFileCommands, BTREE_BAD, BTREE_LEAF
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOOL = os.path.join(REPO_ROOT, "LisaFileSystemToolPerFile.py")
@@ -52,7 +52,7 @@ def report(ok, msg):
 def quiet_fs(image):
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        return FileSystemWithAddFile(image)
+        return FileSystemWithPerFileCommands(image)
 
 
 def tag_checksums_ok(image) -> int:

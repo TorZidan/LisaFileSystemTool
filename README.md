@@ -20,13 +20,13 @@ two image container formats (DC42 and Raw ProFile), works with both floppy and P
 volumes, and works with every known LOS file-system version v14 = LOS 1.0 through v17 = LOS 3.1,
 i.e. both the old "flat catalog" volumes and the newer HFS-style B-tree catalog volumes. 
 
-A companion tool, `LisaFileSystemToolPerFile.py` (described in §1.3), extends it with the
-`add` file, `replace` file, `put` file (aka add-or-replace) and `delete` file commands: it can add a new file to a disk image,
+A companion tool, `LisaFileSystemToolPerFile.py` (described in §1.2), extends it with the
+`add` file, `replace` file, `put` file (aka add-or-replace), `delete` file and `get` file commands: it can add a new file to a disk image,
 replace the contents of an existing file, put a file (add it if absent, replace it if present),
-or delete a file, on both flat-catalog (LOS 1.0/2.0)
+delete a file, or save a file from the disk image to a host file. Works with both flat-catalog (LOS 1.0/2.0)
 and B-tree (LOS 3.0/3.1) hard-disk volumes.
 It is a thin extension of `LisaFileSystemTool.py` — all the disk-image machinery is imported
-from there, and only the add/replace/put/delete-specific code lives in the second file.
+from there, and only the add/replace/put/delete/get-specific code lives in the second file.
 
 The tool can also remove file copy protection from such disk images (if any is present), which makes
 them more universal: they are no-longer tied to a specific Lisa serial number, and thus can be used (run successfully) on any real and emulated Lisa. 
@@ -62,17 +62,18 @@ python3 LisaFileSystemTool.py <command> <disk image file name>
 | `fix_dc42_checksum`| For DC42 files: checks if the data and tag checksums are correct in the DC42 header, and fixes the incorrect ones, if any. |
 
 
-### 1.2 LisaFileSystemToolPerFile.py  — adding, replacing and deleting files
+### 1.2 LisaFileSystemToolPerFile.py  — adding, replacing, deleting and getting files
 
-`LisaFileSystemToolPerFile.py` is a companion tool that **writes** files onto a disk image.
+`LisaFileSystemToolPerFile.py` is a companion tool that  reads/writes  files from/to a disk image.
 It is a thin extension of `LisaFileSystemTool.py` (all the disk-image machinery code is imported
-from there; only the add/replace/put/delete-specific code lives in this file).
+from there; only the add/replace/put/delete/get-specific code lives in this file).
 
 ```
 python3 LisaFileSystemToolPerFile.py add     <disk image file name> <host file name> <lisa file name>
 python3 LisaFileSystemToolPerFile.py replace <disk image file name> <host file name> <lisa file name>
 python3 LisaFileSystemToolPerFile.py put     <disk image file name> <host file name> <lisa file name>
 python3 LisaFileSystemToolPerFile.py delete  <disk image file name> <lisa file name>
+python3 LisaFileSystemToolPerFile.py get     <disk image file name> <lisa file name> <host file name>
 ```
 
 | Command   | What it does |
@@ -81,11 +82,14 @@ python3 LisaFileSystemToolPerFile.py delete  <disk image file name> <lisa file n
 | `replace` | Replaces the contents of an existing file (found by name, case-insensitive) in place, reusing the file's existing sectors: if the new file is larger, only the extra sectors are newly allocated; if it is smaller, the unused old sectors are freed. If no file with that name exists, nothing is changed. |
 | `put`     | A convenient add-or-replace command. |
 | `delete`  | Deletes a regular file (found by name, case-insensitive): the catalog entry is removed, the file's data and hint pages are released to the free pool, and the s-list sentry is emptied, exactly as the OS `kill_sfile`/`Ddelete` paths do. On B-tree volumes the catalog record is removed with the OS b-tree deletion algorithm (including the underflow rebalancing: merge or rotate with the sibling, propagation up to the root, and tree-depth shrink when the root becomes empty); freed catalog nodes are zeroed and their pages returned to the free pool. On flat-catalog volumes the centry is cleared per the OS `KILL_ENTRY` rules (including entries that straddle catalog page boundaries). Directories and other non-file catalog entries are rejected. The MDDF counters (`filecount`, `freecount`, `fs_overhead`, `empty_file`, and — on B-tree volumes — `root_page`/`tree_depth`) are all kept consistent, and every affected sector's tag checksum and the DC42 checksums (if any) are fixed up. If the MDDF `tree_depth` field turns out to be stale (e.g. after an interrupted operation), it is corrected from the actual tree structure and a warning is printed. |
+| `get`     | Saves a regular file (found by name, case-insensitive) from the volume to a host file, overwriting the host file if it exists. Text files (with file names ending with ".text") are saved as plain host text, exactly like the `dump` command. Directories and other non-file catalog entries are rejected, and a name that matches several files in different directories is refused. The disk image is only read, never modified. |
 
 Exit codes: `0` = success; `3` = nothing was done (`add`: a file with that name already exists /
-`replace`: no file with that name on the volume / `delete`: no file with that name on the volume);
-`1` = any other failure (including: `delete` given the name of a directory or other non-file
-catalog entry). `put` never returns `3`: it always performs either the add or the replace, so
+`replace`: no file with that name on the volume / `delete`: no file with that name on the volume /
+`get`: no file with that name on the volume);
+`1` = any other failure (including: `delete` or `get` given the name of a directory or other
+non-file catalog entry, and `get` given a name that matches several files in different
+directories). `put` never returns `3`: it always performs either the add or the replace, so
 for it `0` = done, `1` = failure (e.g. the host file does not exist, or the name exists only as
 a directory or other non-file catalog entry). 
 
@@ -96,9 +100,7 @@ Text files are stored in a special way on the Lisa file system (see [LisaOsTextF
 so, unlike binary files, there is some extra work we need to do when adding/replacing text files: the host text file is
 converted to the on-disk Lisa text layout : line endings become \r, the text is laid out in 1024-byte "pages" of \r-terminated lines with an
 all-zero 1024-byte header "page" prepended, and the stray trailing 0xFF byte that the Computer
-History Museum Lisa source archive text files have is stripped (if any). Together with the `dump`
-command of `LisaFileSystemTool.py` (which converts a .TEXT file back to host text), this makes
-`dump` → edit on the host → `add`/`replace`/`put` a good round trip.
+History Museum Lisa source archive text files have is stripped (if any).
 
 ### 1.4 Accepted input files
 

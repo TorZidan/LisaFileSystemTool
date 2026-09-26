@@ -14,8 +14,8 @@
 #    python3 patch_files.py Lisa_Source . It should print "Successfully applied 248/248 patches".
 # 5. cd ... the folder where this shell script is.
 # 6. run this script: ./upload_files.sh <folder-with-Lisa_Source-files>
-#    It will "upload" 858 files onto the disk image. Observe the final message, it should print 
-#    "Done: 860 file(s) added, 0 already present, 0 failure(s)."
+#    It will "upload" 862 files onto the disk image. Observe the final message, it should print 
+#    "Done: 862 file(s) added, 0 already present, 0 failure(s)" the first time you run it.
 # 7. There you have it. Mount the LOS_Compilation_Base_original.image disk image in the LisaEm emulator
 #    or on a real Lisa using an ESProfile hardware emulator,
 #    boot into Workshop and run "<ALEX/MAKE/ALL_NODISKS2" to build everything except Lisa Guide.

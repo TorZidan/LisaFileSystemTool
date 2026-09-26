@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 #####################################################################################################
-# LisaFileSystemToolPerFile.py implements the "add", "replace", "put", and "delete" commands:           #
-# they add / replace / put (add if absent, replace if present) / delete a host file on a disk image.   #
+# LisaFileSystemToolPerFile.py implements the "add", "replace", "put", "delete", and "get" commands: #
+# they add / replace / put (add if absent, replace if present) / delete a host file on a disk image, #
+# or save (get) a file from the disk image to a host file.                                           #
 #                                                                                                    #
 # It is a thin extension of the adjacent LisaFileSystemTool.py: all the disk-image machinery         #
 # (DC42/Raw ProFile parsing, MDDF, slist, catalog, tags, checksums, ...) is imported from there,     #
-# and only the add/replace/put/delete-specific code lives in this file (in the AddFileMixin /        #
-# ReplaceFileMixin / PutFileMixin / DeleteFileMixin classes below).                                  #
+# and only the add/replace/put/delete/get-specific code lives in this file (in the AddFileMixin /    #
+# ReplaceFileMixin / PutFileMixin / DeleteFileMixin / GetFileMixin classes below).                   #
 #                                                                                                    #
 # Usage:                                                                                             #
 #   python LisaFileSystemToolPerFile.py add      <disk image file name> <host file> <lisa file name> #
 #   python LisaFileSystemToolPerFile.py replace  <disk image file name> <host file> <lisa file name> #
 #   python LisaFileSystemToolPerFile.py put      <disk image file name> <host file> <lisa file name> #
 #   python LisaFileSystemToolPerFile.py delete   <disk image file name> <lisa file name>             #
+#   python LisaFileSystemToolPerFile.py get      <disk image file name> <lisa file name> <host file> #
 #                                                                                                   #
 # THIS IS EXPERIMENTAL CODE !!!                                                                     #
 #                                                                                                   #
@@ -33,6 +35,7 @@ from LisaFileSystemTool import (
     InMemoryFileSystem,
     flat_catalog_hash,
     interleave5,
+    lisa_text_file_to_host_text,
 )
 
 # A Lisa ".TEXT" file is stored on disk as:
@@ -2813,13 +2816,145 @@ class PutFileMixin(DeleteFileMixin):
         return 0 if rc == 0 else 1
 
 
-class FileSystemWithAddFile(InMemoryFileSystem, PutFileMixin):
+class GetFileMixin(ReplaceFileMixin):
+    """The "get" command: get_file().
+
+    get = save a file from the volume to a host file (the inverse of
+    add/replace/put): locate a regular file by name (case-insensitive) with
+    the shared read-only locator _locate_named_file(), read its data with
+    flat_catalog_read_file_data() (the slist-driven tag-chain walk of the OS
+    read path, with the stale-sentry / broken-chain fallback that reads every
+    sector tagged +s_file_id), and write the bytes to the host file,
+    overwriting it if it exists.
+
+    ".TEXT" files are converted back to plain host text with
+    lisa_text_file_to_host_text() (the inverse of
+    build_lisa_text_file_data()), exactly like the "dump" command of
+    LisaFileSystemTool.py.
+
+    The disk image is only read, never written, so get does not need the
+    "is the image open by another process" confirmation the modifying
+    commands ask for.
+
+    Returns the exit code to use: 0 on success, 3 if no file with that
+    name is on the volume, and 1 on any other failure.
+    """
+
+    def get_file(self, lisa_name: str, host_file_path: str) -> int:
+        """Save the file named lisa_name from this volume to the host file
+        host_file_path, overwriting the host file if it exists.
+
+        The file is located by name (case-insensitive) with the shared
+        read-only locator _locate_named_file(): on b-tree volumes every
+        catalog record is scanned (fileentry records only), on flat-catalog
+        volumes the rootcatalog is probed with the same hash + linear
+        probing as the OS LOOKUP_BY_ENAME. Directories and other non-file
+        entries are refused; if several files share the name (b-tree
+        volumes), none of them is chosen.
+
+        The data is read with flat_catalog_read_file_data(): it follows the
+        tag chain from the slist's fileaddr (the same mechanics as the OS
+        read path), and if the slist entry is stale or the chain is broken
+        it falls back to reading every sector tagged +s_file_id in
+        sector-number order. The result is truncated to the sentry's
+        filesize.
+
+        ".TEXT" files: same rule as the "dump" command of
+        LisaFileSystemTool.py — if lisa_name ends in ".TEXT"
+        (case-insensitive) the on-disk text layout is converted back to
+        plain host text (header page and null page padding stripped, CR
+        line endings become "\n", DLE leading-space codes expanded).
+
+        The disk image is not modified at all.
+
+        Returns the exit code to use: 0 on success, 3 if no file with that
+        name is on the volume, and 1 on any other failure.
+        """
+        # ---- preconditions (same as add/replace/delete) ----
+        if self._fs_version not in (14, 15, 16, 17):
+            print(
+                f"ERROR: get supports flat-catalog (fs_version 14/15) and b-tree (fs_version 16/17) volumes; this volume is fs_version {self._fs_version}."
+            )
+            return 1
+        if not lisa_name:
+            print("ERROR: the Lisa file name is empty.")
+            return 1
+
+        # ---- locate the file (read-only) ----
+        located = self._locate_named_file(lisa_name)
+        if located.status == "file":
+            sfile = located.sfile
+        elif located.status == "multiple":
+            print(
+                f"ERROR: {located.count} files are named '{lisa_name}' on this volume (in "
+                "different directories); cannot tell which one to get."
+            )
+            return 1
+        elif located.status == "directory":
+            if not self.is_flat_catalog_volume():
+                print(
+                    f"ERROR: a catalog entry named '{lisa_name}' exists on this volume but it is a "
+                    "directory, not a file; it cannot be saved to a host file by this command."
+                )
+            else:
+                print(
+                    f"ERROR: a catalog entry named '{lisa_name}' exists on this volume but is not a "
+                    f"regular file (cetype = {located.cetype}); it cannot be saved to a host file by this command."
+                )
+            return 1
+        elif located.status == "bad_catalog":
+            print(
+                "ERROR: could not read the rootcatalog; the volume's metadata is inconsistent."
+            )
+            return 1
+        else:  # 'not_found'
+            print(f"WARNING: no file named '{lisa_name}' on this volume; nothing to get.")
+            return 3
+
+        # ---- read the file's data (read-only) ----
+        sentry = self._slist_entry(sfile)
+        if sentry is None:
+            print(
+                f"ERROR: the slist has no entry for s-file {sfile}; the volume's metadata is inconsistent."
+            )
+            return 1
+        _hintaddr, _fileaddr, filesize, _version = sentry
+        try:
+            data = self.flat_catalog_read_file_data(sfile)
+        except (ValueError, RuntimeError) as e:
+            print(f"ERROR: {e}")
+            return 1
+        if len(data) < filesize:
+            print(
+                f"WARNING: could only read {len(data)} of the {filesize} bytes of '{lisa_name}'; "
+                "the tag chain is broken and the tagged-sector fallback could not recover the rest."
+            )
+
+        # ---- ".TEXT" files: convert the on-disk layout back to host text ----
+        if lisa_name.upper().endswith(".TEXT"):
+            data = lisa_text_file_to_host_text(data)
+
+        # ---- write the host file (overwrite it if it exists) ----
+        try:
+            with open(host_file_path, "wb") as host_file:
+                host_file.write(data)
+        except OSError as e:
+            print(f"ERROR: cannot write host file '{host_file_path}': {e}")
+            return 1
+        print(
+            f"Saved '{lisa_name}' (s-file {sfile}, {filesize} byte(s) on disk) to host file "
+            f"'{host_file_path}' ({len(data)} byte(s))."
+        )
+        return 0
+
+
+class FileSystemWithPerFileCommands(InMemoryFileSystem, PutFileMixin, GetFileMixin):
     """InMemoryFileSystem plus the add (add_file), replace (replace_file),
-    put (put_file) and delete (delete_file) capabilities.
+    put (put_file), delete (delete_file) and get (get_file) capabilities.
 
     PutFileMixin already extends DeleteFileMixin (which extends
-    ReplaceFileMixin, which extends AddFileMixin), so all four commands are
-    available.
+    ReplaceFileMixin, which extends AddFileMixin), and GetFileMixin extends
+    ReplaceFileMixin, so all five commands are available.
     """
 
     pass
@@ -2829,17 +2964,18 @@ class FileSystemWithAddFile(InMemoryFileSystem, PutFileMixin):
 if __name__ == "__main__":
     command = sys.argv[1].strip().lower() if len(sys.argv) >= 2 else ""
 
-    if command not in ("add", "replace", "put", "delete"):
+    if command not in ("add", "replace", "put", "delete", "get"):
         print(
             "Usage: python LisaFileSystemToolPerFile.py <command> <disk image file name> [host file] <lisa file name>"
         )
-        print("       <command> is 'add', 'replace', 'put', or 'delete'.")
+        print("       <command> is 'add', 'replace', 'put', 'delete', or 'get'.")
         print(
-            "This tool implements the 'add', 'replace', 'put', and 'delete' commands; use LisaFileSystemTool.py for the other commands."
+            "This tool implements the 'add', 'replace', 'put', 'delete', and 'get' commands; use LisaFileSystemTool.py for the other commands."
         )
         print(
             "Exit codes: 0 = success; 3 = add: a file with that name already exists (nothing was added) / "
-            "replace or delete: no file with that name exists on the volume (nothing was changed); "
+            "replace or delete: no file with that name exists on the volume (nothing was changed) / "
+            "get: no file with that name exists on the volume (nothing was written); "
             "1 = any other failure (put returns only 0 or 1)."
         )
         sys.exit(1)
@@ -2852,6 +2988,15 @@ if __name__ == "__main__":
             sys.exit(1)
         disk_image_file_name = sys.argv[2]
         lisa_os_file_name = sys.argv[3]
+    elif command == "get":
+        if len(sys.argv) != 5:
+            print(
+                "Usage: python LisaFileSystemToolPerFile.py get <disk image file name> <lisa file name> <host file name>"
+            )
+            sys.exit(1)
+        disk_image_file_name = sys.argv[2]
+        lisa_os_file_name = sys.argv[3]
+        host_file_name = sys.argv[4]
     else:
         if len(sys.argv) != 5:
             print(
@@ -2866,7 +3011,7 @@ if __name__ == "__main__":
     # ValueError, ...) into a one-line error message and a non-zero exit status.
     # FileSystem.__init__ itself just raises, so the class stays usable from other code.
     try:
-        file_system = FileSystemWithAddFile(disk_image_file_name)
+        file_system = FileSystemWithPerFileCommands(disk_image_file_name)
     except FileNotFoundError:
         print(f"File {disk_image_file_name} not found!")
         sys.exit(1)
@@ -2879,26 +3024,30 @@ if __name__ == "__main__":
         )
         sys.exit(1)
 
-    # Every command below modifies the disk image on disk, so first make sure
-    # the image file is not currently open by some other process; if it is,
-    # warn the user and only continue if they explicitly agree.
-    try:
-        proceed = file_system._confirm_proceed_if_disk_image_is_open_by_other_process()
-    except EOFError:
-        # No interactive terminal (stdin closed/redirected): don't prompt, just skip.
-        print(
-            "No interactive terminal for the confirmation prompt; the disk image was not modified."
-        )
-        sys.exit(1)
-    if not proceed:
-        print("Aborted by user; the disk image was not modified.")
-        sys.exit(1)
+    # Every command below, except "get", modifies the disk image on disk, so
+    # first make sure the image file is not currently open by some other
+    # process; if it is, warn the user and only continue if they explicitly
+    # agree. "get" only reads the image (it saves a file from it to the
+    # host), so it does not need the confirmation.
+    if command != "get":
+        try:
+            proceed = file_system._confirm_proceed_if_disk_image_is_open_by_other_process()
+        except EOFError:
+            # No interactive terminal (stdin closed/redirected): don't prompt, just skip.
+            print(
+                "No interactive terminal for the confirmation prompt; the disk image was not modified."
+            )
+            sys.exit(1)
+        if not proceed:
+            print("Aborted by user; the disk image was not modified.")
+            sys.exit(1)
 
     # Every command method returns the exit code to use directly:
     # 0 = success, 3 = no action was needed (add: a file with that name
     # already exists / replace and delete: no file with that name on the
-    # volume — so callers re-running an upload list can count "no action
-    # needed" separately from success and from a real failure),
+    # volume / get: no file with that name on the volume — so callers
+    # re-running an upload list can count "no action needed" separately from
+    # success and from a real failure),
     # 1 = any other failure. put_file() never returns 3: it always performs
     # the add or the replace, so for it 0 = done, 1 = failure.
     if command == "add":
@@ -2907,6 +3056,8 @@ if __name__ == "__main__":
         sys.exit(file_system.replace_file(host_file_name, lisa_os_file_name))
     elif command == "put":
         sys.exit(file_system.put_file(host_file_name, lisa_os_file_name))
+    elif command == "get":
+        sys.exit(file_system.get_file(lisa_os_file_name, host_file_name))
     else:
         sys.exit(file_system.delete_file(lisa_os_file_name))
     # That's all, Folks!
