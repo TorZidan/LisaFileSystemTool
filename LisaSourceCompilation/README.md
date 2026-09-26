@@ -2,7 +2,7 @@
 # Uploading Lisa OS source files to a ProFile disk image and compiling them in Lisa Workshop
 
 **Author:** [TorZidan](https://github.com/TorZidan)  
-**Last Updated:** Sept 23, 2026  
+**Last Updated:** Sept 26, 2026  
 
 ## Overview
 
@@ -128,12 +128,12 @@ figuring out how to compile the Lisa OS sources in the first place.
 
 ## How to compile the Lisa OS sources on a real Lisa 
 
-You will need an ESProfile hardware ProFile disk emulator and a Lisa 2/10 or XL with H ROMS. You will need 1.5 MB or RAM or more.
+You will need an ESProfile hardware ProFile disk emulator on a Lisa with H ROMS and 1.5 MB of RAM or more (2 MB is the max).
 
 Prepare the file `LOS_Compilation_Base.image` using the instructions above, copy it to an SD card,
-plug it into your ESProfile and power-on the Lisa. Boot from the "upper" boot device 1 (known as the "Widget" hard drive on Lisa 2/10).
-   
-- Why can't we use a Lisa 2/5? The disk image was created as Disk 1, and trying to boot from it when mounted as Disk 2 results in a boot error. You can boot from Disk 1 only on a Lisa 2/10 (afaik). 
+plug it into your ESProfile, power-on the Lisa and boot from the disk image.
+
+  - If you get a boot error, it is most likely because the disk image was created as Lisa Disk 1 (on a Lisa 2/10 where the Widget hard drive is at boot position 1), but now you are trying to boot up from Disk 2 (the case on a Lisa 2/5).
 
 In the environment selection dialog, click on "Workshop" and then the "Start" button. You are in Workshop 3.0
 
@@ -158,6 +158,6 @@ Configure LisaEm to use 1.5 MB or RAM, H-ROMs, "I/O ROM of "88". Mount the `LOS_
 
 Then follow the instructions "on a real Lisa" above.
 
-This process has been verified to works repeatedly and consistently well, with no crashes. On my PC, it takes about a minute to "upload" the Lisa OS source files (using the shell script above), and about 5 minutes to compile everything (except LisaGuide) at top emulation speed (Throttle->512Mhz).
+This process has been verified to works repeatedly and consistently well, with no crashes. On my PC, it takes about a minute to "upload" the Lisa OS source files (using the shell script above), and about 5 minutes to compile everything (except LisaGuide) at top emulation speed (Using the Throttle->512Mhz menu).
 
 This opens the doors for a full "write code -> upload it -> build it-> run it -> test it" automated AI development cycle with LisaEm. Exciting times. Enjoy!
