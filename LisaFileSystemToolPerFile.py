@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 #####################################################################################################
-# LisaFileSystemToolPerFile.py implements the "add", "replace", and "delete" commands:                  #
-# they add / replace / delete a host file on a LOS/Workshop disk image. Works with binary and text.    #
+# LisaFileSystemToolPerFile.py implements the "add", "replace", "put", and "delete" commands:           #
+# they add / replace / put (add if absent, replace if present) / delete a host file on a disk image.   #
 #                                                                                                    #
 # It is a thin extension of the adjacent LisaFileSystemTool.py: all the disk-image machinery         #
 # (DC42/Raw ProFile parsing, MDDF, slist, catalog, tags, checksums, ...) is imported from there,     #
-# and only the add/replace-specific code lives in this file (in the AddFileMixin /                   #
-# ReplaceFileMixin classes below).                                                                   #
+# and only the add/replace/put/delete-specific code lives in this file (in the AddFileMixin /        #
+# ReplaceFileMixin / PutFileMixin / DeleteFileMixin classes below).                                  #
 #                                                                                                    #
 # Usage:                                                                                             #
 #   python LisaFileSystemToolPerFile.py add      <disk image file name> <host file> <lisa file name> #
 #   python LisaFileSystemToolPerFile.py replace  <disk image file name> <host file> <lisa file name> #
+#   python LisaFileSystemToolPerFile.py put      <disk image file name> <host file> <lisa file name> #
 #   python LisaFileSystemToolPerFile.py delete   <disk image file name> <lisa file name>             #
 #                                                                                                   #
 # THIS IS EXPERIMENTAL CODE !!!                                                                     #
@@ -75,6 +76,11 @@ BTREE_NONLEAF = 1  # NodeDesc.kind: interior node
 BTREE_NODEDESC_SIZE = 12  # nkeys(2) prior(4) next(4) kind(1) cksum(1)
 BTREE_HE_VERSION = 21  # cur_file_version (source-sfileio), written by MAKE_ENTRY
 BTREE_MAX_NAME = 32  # MakeKey fits at most 32 name bytes into the key
+
+# Flat-catalog (fs_version 14/15) name limit, from source-fsprim: the centry's
+# e_name is a Pascal string[33] (1 length byte + 33 chars) at offset 0, so a
+# name may be at most 33 characters (cetype follows at offset 34).
+FLAT_MAX_NAME = 33
 
 
 class _BTreeNode:
@@ -845,7 +851,7 @@ class AddFileMixin:
             ins_index = par_idx + 1
             level -= 1
 
-    def _add_file_btree(self, host_file_path: str, lisa_name: str) -> "int":
+    def _add_file_btree(self, host_file_path: str, lisa_name: str) -> int:
         """Add a host file into a b-tree-catalog (fs_version 16/17) volume as a
         new Lisa file.
 
@@ -1180,7 +1186,7 @@ class AddFileMixin:
             )
         return 0
 
-    def add_file(self, host_file_path: str, lisa_name: str) -> "int":
+    def add_file(self, host_file_path: str, lisa_name: str) -> int:
         """Add a host file into this flat-catalog (fs_version 14/15) volume as a new Lisa file.
 
         This replicates the OS's MAKE_ENTRY + NEW_SFILE + APPENDPAGES + write path
@@ -1225,9 +1231,9 @@ class AddFileMixin:
         if not lisa_name:
             print("ERROR: the Lisa file name is empty.")
             return 1
-        if len(lisa_name) > 33:
+        if len(lisa_name) > FLAT_MAX_NAME:
             print(
-                f"ERROR: Lisa file name '{lisa_name}' is {len(lisa_name)} chars; max is 33."
+                f"ERROR: Lisa file name '{lisa_name}' is {len(lisa_name)} chars; max is {FLAT_MAX_NAME}."
             )
             return 1
         # Lisa does not treat '/' as a folder delimiter in file names, so
@@ -1237,9 +1243,9 @@ class AddFileMixin:
         except UnicodeEncodeError as e:
             print(f"ERROR: cannot encode '{lisa_name}' as Mac Roman: {e}")
             return 1
-        if len(name_bytes) > 33:
+        if len(name_bytes) > FLAT_MAX_NAME:
             print(
-                f"ERROR: '{lisa_name}' is {len(name_bytes)} Mac-Roman bytes; max is 33."
+                f"ERROR: '{lisa_name}' is {len(name_bytes)} Mac-Roman bytes; max is {FLAT_MAX_NAME}."
             )
             return 1
 
@@ -1501,13 +1507,57 @@ class AddFileMixin:
         return 0
 
 
+class _LocatedFile:
+    """Result of ReplaceFileMixin._locate_named_file(): the read-only
+    classification of the catalog entry (if any) named lisa_name.
+
+    status is one of:
+      'file'        exactly one file entry with the name: sfile is its
+                    s-file number, leaf/idx/rec its b-tree record (all None
+                    on flat-catalog volumes), slot the centry's index in
+                    the rootcatalog (flat-catalog volumes)
+      'directory'   the name exists only as a directory (b-tree volumes) or
+                    as a non-file catalog entry (flat volumes; cetype holds
+                    the entry's type)
+      'multiple'    several file entries share the name (b-tree volumes);
+                    count is how many
+      'not_found'   no entry with the name
+      'bad_catalog' the flat rootcatalog could not be read (the volume's
+                    metadata is inconsistent)
+    """
+
+    def __init__(
+        self,
+        status,
+        sfile=None,
+        leaf=None,
+        idx=None,
+        rec=None,
+        count=0,
+        cetype=None,
+        slot=None,
+    ):
+        self.status = status
+        self.sfile = sfile
+        self.leaf = leaf
+        self.idx = idx
+        self.rec = rec
+        self.count = count
+        self.cetype = cetype
+        self.slot = slot
+
+
 class ReplaceFileMixin(AddFileMixin):
     """The "replace" command: replace_file() and its private helpers.
 
     Inherits every AddFileMixin helper (MDDF/sector/tag/bitmap/b-tree machinery)
-    and adds replace_file(): replace the contents of an EXISTING file on the
-    volume with the contents of a host file, reusing the sectors the file
-    already occupies:
+    and adds replace_file() plus the shared name-lookup helpers: the low-level
+    scans (_bt_scan_entries(), _bt_find_named_entries(),
+    _flat_read_rootcatalog(), _find_flat_file_slot()) and _locate_named_file(),
+    the read-only locator both replace_file() and put_file() use to classify
+    the catalog entry (if any) named lisa_name. replace_file() replaces the
+    contents of an EXISTING file on the volume with the contents of a host
+    file, reusing the sectors the file already occupies:
       * if the new file is LARGER, all of the old file's sectors are reused
         and only the extra sectors are newly allocated;
       * if the new file is SMALLER, only as many of the old sectors as needed
@@ -1541,6 +1591,43 @@ class ReplaceFileMixin(AddFileMixin):
                 for idx, rec in enumerate(node.records):
                     yield node, idx, rec
 
+    def _bt_find_named_entries(self, lisa_name: str):
+        """Scan EVERY record of the b-tree root catalog for records whose name
+        matches lisa_name (case-insensitive), the same scan replace_file uses
+        to locate its victim. Returns (file_matches, dir_matches):
+        file_matches is the list of (leaf_node, record_index, record) for every
+        fileentry (eType high byte 3) with that name, and dir_matches is the
+        number of directory (threadentry/direntry) records with that name."""
+        file_matches = []
+        dir_matches = 0
+        for node, idx, rec in self._bt_scan_entries():
+            name = rec[3:35].split(b"\x00", 1)[0].decode("mac-roman", errors="replace")
+            if name.upper() != lisa_name.upper():
+                continue
+            if rec[36] == 3:  # eType high byte = fileentry
+                file_matches.append((node, idx, rec))
+            else:
+                dir_matches += 1  # a directory (threadentry/direntry) record
+        return file_matches, dir_matches
+
+    def _flat_read_rootcatalog(self):
+        """Read the whole rootcatalog of a flat-catalog volume and return
+        (cat_data, cat_chain, rootmaxentries, rc_filesize): cat_data is all
+        catalog pages concatenated, cat_chain the MDDF-relative page number
+        of each catalog page, rootmaxentries the catalog's entry capacity,
+        and rc_filesize the rootcatalog s-file's filesize (from its sentry).
+        Returns None if the rootcatalog cannot be located (the volume's
+        metadata is inconsistent)."""
+        rc_sfile = self._find_rootcatalog_sfile()
+        rc = self._slist_entry(rc_sfile)
+        if rc is None or rc[1] == 0:
+            return None
+        cat_chain = self._data_page_chain(rc[1])
+        cat_data = b"".join(
+            self.read_sector(self._mddf_sector_number + p) for p in cat_chain
+        )
+        return cat_data, cat_chain, self._mddf_u16(0xC0), rc[2]
+
     def _find_flat_file_slot(
         self, cat_data: bytes, lisa_name: str, rootmaxentries: int
     ):
@@ -1564,7 +1651,40 @@ class ReplaceFileMixin(AddFileMixin):
                     return idx
         return None
 
-    def replace_file(self, host_file_path: str, lisa_name: str) -> "int":
+    def _locate_named_file(self, lisa_name: str) -> _LocatedFile:
+        """Read-only name lookup shared by replace_file() and put_file():
+        locate the catalog entry (if any) named lisa_name (case-insensitive)
+        and classify it, running the same lookups as before — a full scan of
+        the b-tree root catalog on b-tree volumes, rootcatalog hash + linear
+        probing on flat-catalog volumes. Returns a _LocatedFile. Strictly
+        read-only, so it is safe to run before add_file()/replace_file()
+        decide what to do."""
+        if not self.is_flat_catalog_volume():
+            file_matches, dir_matches = self._bt_find_named_entries(lisa_name)
+            if len(file_matches) > 1:
+                return _LocatedFile("multiple", count=len(file_matches))
+            if file_matches:
+                leaf, idx, rec = file_matches[0]
+                sfile = struct.unpack(">H", rec[38:40])[0]
+                return _LocatedFile("file", sfile=sfile, leaf=leaf, idx=idx, rec=rec)
+            if dir_matches:
+                return _LocatedFile("directory")
+            return _LocatedFile("not_found")
+        rc = self._flat_read_rootcatalog()
+        if rc is None:
+            return _LocatedFile("bad_catalog")
+        cat_data, _cat_chain, rootmaxentries, _rc_filesize = rc
+        slot = self._find_flat_file_slot(cat_data, lisa_name, rootmaxentries)
+        if slot is None:
+            return _LocatedFile("not_found")
+        centry = cat_data[slot * 54 : slot * 54 + 54]
+        cetype = centry[34]
+        if cetype != 3:  # a directory or other non-file entry
+            return _LocatedFile("directory", cetype=cetype)
+        sfile = struct.unpack(">H", centry[36:38])[0]
+        return _LocatedFile("file", sfile=sfile, slot=slot)
+
+    def replace_file(self, host_file_path: str, lisa_name: str) -> int:
         """Replace the contents of an EXISTING file on this volume with the
         contents of a host file, in place.
 
@@ -1616,7 +1736,7 @@ class ReplaceFileMixin(AddFileMixin):
             data = f.read()
 
         # ---- validate the Lisa file name (same limits as add) ----
-        max_name = BTREE_MAX_NAME if is_btree else 33
+        max_name = BTREE_MAX_NAME if is_btree else FLAT_MAX_NAME
         if not lisa_name:
             print("ERROR: the Lisa file name is empty.")
             return 1
@@ -1674,64 +1794,39 @@ class ReplaceFileMixin(AddFileMixin):
                     f"ERROR: unexpected smallmap_offset 0x{smallmap_off:x}; cannot update the file map in hint page 0."
                 )
                 return 1
-            file_matches = []
-            dir_matches = 0
-            for node, idx, rec in self._bt_scan_entries():
-                name = (
-                    rec[3:35].split(b"\x00", 1)[0].decode("mac-roman", errors="replace")
-                )
-                if name.upper() != lisa_name.upper():
-                    continue
-                if rec[36] == 3:  # eType high byte = fileentry
-                    file_matches.append((node, idx, rec))
-                else:
-                    dir_matches += 1  # a directory (threadentry/direntry) record
-            if file_matches:
-                if len(file_matches) > 1:
-                    print(
-                        f"ERROR: {len(file_matches)} files are named '{lisa_name}' on this volume (in "
-                        "different directories); cannot tell which one to replace."
-                    )
-                    return 1
-                leaf, idx, rec = file_matches[0]
-                sfile = struct.unpack(">H", rec[38:40])[0]
-            elif dir_matches:
+        located = self._locate_named_file(lisa_name)
+        if located.status == "file":
+            sfile = located.sfile
+            leaf = located.leaf  # None on flat volumes
+            idx = located.idx  # None on flat volumes
+        elif located.status == "multiple":
+            print(
+                f"ERROR: {located.count} files are named '{lisa_name}' on this volume (in "
+                "different directories); cannot tell which one to replace."
+            )
+            return 1
+        elif located.status == "directory":
+            if is_btree:
                 print(
                     f"ERROR: a catalog entry named '{lisa_name}' exists on this volume but it is a "
                     "directory, not a file; cannot replace it."
                 )
-                return 1
             else:
                 print(
-                    f"WARNING: no file named '{lisa_name}' on this volume; nothing to replace."
-                )
-                return 3
-        else:
-            rc_sfile = self._find_rootcatalog_sfile()
-            rc = self._slist_entry(rc_sfile)
-            if rc is None or rc[1] == 0:
-                print(
-                    "ERROR: could not read the rootcatalog; the volume's metadata is inconsistent."
-                )
-                return 1
-            cat_chain = self._data_page_chain(rc[1])
-            cat_data = b"".join(self.read_sector(mddf + p) for p in cat_chain)
-            rootmaxentries = self._mddf_u16(0xC0)
-            slot = self._find_flat_file_slot(cat_data, lisa_name, rootmaxentries)
-            if slot is None:
-                print(
-                    f"WARNING: no file named '{lisa_name}' on this volume; nothing to replace."
-                )
-                return 3
-            centry = cat_data[slot * 54 : slot * 54 + 54]
-            if centry[34] != 3:  # cetype must be fileentry
-                print(
                     f"ERROR: a catalog entry named '{lisa_name}' exists on this volume but is not a "
-                    f"regular file (cetype = {centry[34]}); cannot replace it."
+                    f"regular file (cetype = {located.cetype}); cannot replace it."
                 )
-                return 1
-            sfile = struct.unpack(">H", centry[36:38])[0]
-            leaf = idx = None  # no b-tree record to update on flat volumes
+            return 1
+        elif located.status == "bad_catalog":
+            print(
+                "ERROR: could not read the rootcatalog; the volume's metadata is inconsistent."
+            )
+            return 1
+        else:  # 'not_found'
+            print(
+                f"WARNING: no file named '{lisa_name}' on this volume; nothing to replace."
+            )
+            return 3
 
         # ---- the file's current layout (read-only) ----
         sentry = self._slist_entry(sfile)
@@ -2293,15 +2388,18 @@ class DeleteFileMixin(ReplaceFileMixin):
             parent_page = path[level - 2][0]
             pidx = path[level - 2][1]
 
-    def delete_file(self, lisa_name: str) -> "int":
+    def delete_file(self, lisa_name: str) -> int:
         """Delete the file named lisa_name from this volume, as the OS does on
         KILL (see the class docstring).
 
-        The file is located by name (case-insensitive): on b-tree volumes
-        every catalog record is scanned (fileentry records only), on
-        flat-catalog volumes the rootcatalog is probed with the same hash +
-        linear probing as the OS LOOKUP_BY_ENAME. Directories and other
-        non-file entries are refused.
+        The file is located by name (case-insensitive) with the shared
+        read-only locator _locate_named_file(): on b-tree volumes every
+        catalog record is scanned (fileentry records only), on flat-catalog
+        volumes the rootcatalog is probed with the same hash + linear
+        probing as the OS LOOKUP_BY_ENAME. On b-tree volumes the record's
+        leaf is then re-derived by a tree search (cross-checked against the
+        scan) because the delete needs the search path. Directories and
+        other non-file entries are refused.
 
         Returns the exit code to use: 0 on success, 3 if no file with that
         name is on the volume, and 1 on any other failure.
@@ -2318,7 +2416,7 @@ class DeleteFileMixin(ReplaceFileMixin):
                 "ERROR: delete currently supports only 20-byte-tag (hard disk) images."
             )
             return 1
-        max_name = BTREE_MAX_NAME if is_btree else 33
+        max_name = BTREE_MAX_NAME if is_btree else FLAT_MAX_NAME
         if not lisa_name:
             print("ERROR: the Lisa file name is empty.")
             return 1
@@ -2356,32 +2454,13 @@ class DeleteFileMixin(ReplaceFileMixin):
         modified = set()
 
         # ---- locate the file (read-only, BEFORE writing anything) ----
-        leaf = None
-        leaf_idx = None
-        path = None
-        slot = None
-        if is_btree:
-            file_matches = []
-            dir_matches = 0
-            for node, idx, rec in self._bt_scan_entries():
-                name = (
-                    rec[3:35].split(b"\x00", 1)[0].decode("mac-roman", errors="replace")
-                )
-                if name.upper() != lisa_name.upper():
-                    continue
-                if rec[36] == 3:  # eType high byte = fileentry
-                    file_matches.append(rec)
-                else:
-                    dir_matches += 1  # a directory (threadentry/direntry) record
-            if file_matches:
-                if len(file_matches) > 1:
-                    print(
-                        f"ERROR: {len(file_matches)} files are named '{lisa_name}' on this volume (in "
-                        "different directories); cannot tell which one to delete."
-                    )
-                    return 1
-                key = file_matches[0][0:36]
-                sfile = struct.unpack(">H", file_matches[0][38:40])[0]
+        located = self._locate_named_file(lisa_name)
+        if located.status == "file":
+            sfile = located.sfile
+            if is_btree:
+                # the delete needs the search path, so re-derive the leaf by
+                # tree search and cross-check it against the scan
+                key = located.rec[0:36]
                 try:
                     leaf, leaf_idx, path, found = self._bt_search_to_leaf(key)
                 except RuntimeError as e:
@@ -2392,42 +2471,36 @@ class DeleteFileMixin(ReplaceFileMixin):
                         "ERROR: the catalog scan and the tree search disagree; the volume's metadata is inconsistent."
                     )
                     return 1
-            elif dir_matches:
+            else:
+                slot = located.slot
+        elif located.status == "multiple":
+            print(
+                f"ERROR: {located.count} files are named '{lisa_name}' on this volume (in "
+                "different directories); cannot tell which one to delete."
+            )
+            return 1
+        elif located.status == "directory":
+            if is_btree:
                 print(
                     f"ERROR: a catalog entry named '{lisa_name}' exists on this volume but it is a "
                     "directory, not a file; it cannot be deleted by this command."
                 )
-                return 1
             else:
                 print(
-                    f"WARNING: no file named '{lisa_name}' on this volume; nothing to delete."
-                )
-                return 3
-        else:
-            rc_sfile = self._find_rootcatalog_sfile()
-            rc = self._slist_entry(rc_sfile)
-            if rc is None or rc[1] == 0:
-                print(
-                    "ERROR: could not read the rootcatalog; the volume's metadata is inconsistent."
-                )
-                return 1
-            cat_chain = self._data_page_chain(rc[1])
-            cat_data = b"".join(self.read_sector(mddf + p) for p in cat_chain)
-            rootmaxentries = self._mddf_u16(0xC0)
-            slot = self._find_flat_file_slot(cat_data, lisa_name, rootmaxentries)
-            if slot is None:
-                print(
-                    f"WARNING: no file named '{lisa_name}' on this volume; nothing to delete."
-                )
-                return 3
-            centry = cat_data[slot * 54 : slot * 54 + 54]
-            if centry[34] != 3:  # cetype must be fileentry
-                print(
                     f"ERROR: a catalog entry named '{lisa_name}' exists on this volume but is not a "
-                    f"regular file (cetype = {centry[34]}); it cannot be deleted by this command."
+                    f"regular file (cetype = {located.cetype}); it cannot be deleted by this command."
                 )
-                return 1
-            sfile = struct.unpack(">H", centry[36:38])[0]
+            return 1
+        elif located.status == "bad_catalog":
+            print(
+                "ERROR: could not read the rootcatalog; the volume's metadata is inconsistent."
+            )
+            return 1
+        else:  # 'not_found'
+            print(
+                f"WARNING: no file named '{lisa_name}' on this volume; nothing to delete."
+            )
+            return 3
 
         # ---- the file's current layout (read-only) ----
         sentry = self._slist_entry(sfile)
@@ -2504,6 +2577,12 @@ class DeleteFileMixin(ReplaceFileMixin):
             )
         else:
             # ---- flat catalog: clear the centry (KILL_ENTRY) ----
+            # The locator only classified the entry; the write re-reads the
+            # rootcatalog (still before any write) for the catalog pages and
+            # the sentry's filesize.
+            cat_data, cat_chain, _rootmaxentries, rc_filesize = (
+                self._flat_read_rootcatalog()
+            )
             # cetype := removed, unless the entry following on the SAME page is
             # empty and this is not the last entry in the catalog: then
             # cetype := emptyentry (shortens probe chains). The name, sfile
@@ -2513,7 +2592,7 @@ class DeleteFileMixin(ReplaceFileMixin):
             cbyte = slot_off % 512
             cetype = 7  # removed
             if (
-                cbyte + 108 <= 512 and slot_off < rc[2] - 54
+                cbyte + 108 <= 512 and slot_off < rc_filesize - 54
             ):  # next fits on page; not last
                 next_centry = cat_data[(slot + 1) * 54 : (slot + 1) * 54 + 35]
                 if len(next_centry) >= 35 and next_centry[34] == 0:  # emptyentry
@@ -2684,12 +2763,63 @@ class DeleteFileMixin(ReplaceFileMixin):
         return 0
 
 
-class FileSystemWithAddFile(InMemoryFileSystem, DeleteFileMixin):
-    """InMemoryFileSystem plus the add (add_file), replace (replace_file) and
-    delete (delete_file) capabilities.
+class PutFileMixin(DeleteFileMixin):
+    """The "put" command: put_file().
 
-    DeleteFileMixin already extends ReplaceFileMixin (which extends
-    AddFileMixin), so all three commands are available.
+    put = add the file if it is not on the volume yet, replace it if it is.
+    Inherits every helper of the other mixins; put_file() itself only runs
+    the shared read-only locator _locate_named_file() and then runs
+    add_file() or replace_file().
+    """
+
+    def put_file(self, host_file_path: str, lisa_name: str) -> int:
+        """Add a host file to this volume, replacing an EXISTING file of the
+        same name (case-insensitive) if there is one.
+
+        A read-only name lookup runs first — the same _locate_named_file()
+        replace_file uses: a full scan of the b-tree root catalog on b-tree
+        volumes, rootcatalog hash + linear probing on flat-catalog volumes —
+        so that exactly one of add_file() / replace_file() runs, on a clean
+        in-memory image. (The lookup must come first: on b-tree volumes a failed
+        add_file() leaves the in-memory image dirty, and a follow-up
+        replace_file() would then operate on stale state.)
+
+        A name that exists only as a directory (b-tree volumes) or as a
+        non-file catalog entry is treated as "exists": replace_file() runs
+        and fails with its specific error, so put reports failure (1) rather
+        than adding a file that would collide with it.
+
+        ".TEXT" files: same rule as add/replace — if lisa_name ends in
+        ".TEXT" (case-insensitive) the host text is converted to the Lisa
+        on-disk text layout first.
+
+        Returns the exit code to use: 0 on success, 1 on any failure.
+        """
+        if self._fs_version not in (14, 15, 16, 17):
+            print(
+                f"ERROR: put supports flat-catalog (fs_version 14/15) and b-tree (fs_version 16/17) volumes; this volume is fs_version {self._fs_version}."
+            )
+            return 1
+        located = self._locate_named_file(lisa_name)
+        if located.status == "bad_catalog":
+            print(
+                "ERROR: could not read the rootcatalog; the volume's metadata is inconsistent."
+            )
+            return 1
+        if located.status in ("file", "directory", "multiple"):
+            rc = self.replace_file(host_file_path, lisa_name)
+        else:
+            rc = self.add_file(host_file_path, lisa_name)
+        return 0 if rc == 0 else 1
+
+
+class FileSystemWithAddFile(InMemoryFileSystem, PutFileMixin):
+    """InMemoryFileSystem plus the add (add_file), replace (replace_file),
+    put (put_file) and delete (delete_file) capabilities.
+
+    PutFileMixin already extends DeleteFileMixin (which extends
+    ReplaceFileMixin, which extends AddFileMixin), so all four commands are
+    available.
     """
 
     pass
@@ -2699,18 +2829,18 @@ class FileSystemWithAddFile(InMemoryFileSystem, DeleteFileMixin):
 if __name__ == "__main__":
     command = sys.argv[1].strip().lower() if len(sys.argv) >= 2 else ""
 
-    if command not in ("add", "replace", "delete"):
+    if command not in ("add", "replace", "put", "delete"):
         print(
             "Usage: python LisaFileSystemToolPerFile.py <command> <disk image file name> [host file] <lisa file name>"
         )
-        print("       <command> is 'add', 'replace', or 'delete'.")
+        print("       <command> is 'add', 'replace', 'put', or 'delete'.")
         print(
-            "This tool implements the 'add', 'replace', and 'delete' commands; use LisaFileSystemTool.py for the other commands."
+            "This tool implements the 'add', 'replace', 'put', and 'delete' commands; use LisaFileSystemTool.py for the other commands."
         )
         print(
             "Exit codes: 0 = success; 3 = add: a file with that name already exists (nothing was added) / "
             "replace or delete: no file with that name exists on the volume (nothing was changed); "
-            "1 = any other failure."
+            "1 = any other failure (put returns only 0 or 1)."
         )
         sys.exit(1)
 
@@ -2769,11 +2899,14 @@ if __name__ == "__main__":
     # already exists / replace and delete: no file with that name on the
     # volume — so callers re-running an upload list can count "no action
     # needed" separately from success and from a real failure),
-    # 1 = any other failure.
+    # 1 = any other failure. put_file() never returns 3: it always performs
+    # the add or the replace, so for it 0 = done, 1 = failure.
     if command == "add":
         sys.exit(file_system.add_file(host_file_name, lisa_os_file_name))
     elif command == "replace":
         sys.exit(file_system.replace_file(host_file_name, lisa_os_file_name))
+    elif command == "put":
+        sys.exit(file_system.put_file(host_file_name, lisa_os_file_name))
     else:
         sys.exit(file_system.delete_file(lisa_os_file_name))
     # That's all, Folks!

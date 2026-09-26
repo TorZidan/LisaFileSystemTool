@@ -1,4 +1,4 @@
-# LisaFileSystemTool — a tool for reading and modifying the Lisa OS File System disk images
+# LisaFileSystemTool — a tool for reading and modifying Lisa Office System disk images
 
 **Author:** [TorZidan](https://github.com/TorZidan)  
 **Last Updated:** Sept 23, 2026  
@@ -16,18 +16,19 @@ The advent of AI and Apple's release of the Lisa OS source files (In January of 
 
 The presented `LisaFileSystemTool.py` is a standalone Python tool for inspecting and modifying
 Apple Lisa Office System (aka LOS) and Workshop disk images. It understands
-two image container formats (DC42 and Raw ProFile), works with both floppy and ProFile/hard-disk
-volumes, and works with every known LOS file-system version (v14 = LOS 1.0 through v17 = LOS 3.1,
-i.e. both the old "flat catalog" volumes and the newer HFS-style B-tree catalog volumes). 
+two image container formats (DC42 and Raw ProFile), works with both floppy and ProFile/Widget/hard-disk
+volumes, and works with every known LOS file-system version v14 = LOS 1.0 through v17 = LOS 3.1,
+i.e. both the old "flat catalog" volumes and the newer HFS-style B-tree catalog volumes. 
 
 A companion tool, `LisaFileSystemToolPerFile.py` (described in §1.3), extends it with the
-`add` file, `replace` file and `delete` file commands: it can add a new file to a disk image,
-replace the contents of an existing file, or delete a file, on both flat-catalog (LOS 1.0/2.0)
+`add` file, `replace` file, `put` file (aka add-or-replace) and `delete` file commands: it can add a new file to a disk image,
+replace the contents of an existing file, put a file (add it if absent, replace it if present),
+or delete a file, on both flat-catalog (LOS 1.0/2.0)
 and B-tree (LOS 3.0/3.1) hard-disk volumes.
 It is a thin extension of `LisaFileSystemTool.py` — all the disk-image machinery is imported
-from there, and only the add/replace/delete-specific code lives in the second file.
+from there, and only the add/replace/put/delete-specific code lives in the second file.
 
-The tool can remove file copy protection from such disk images (if any is present), which makes
+The tool can also remove file copy protection from such disk images (if any is present), which makes
 them more universal: they are no-longer tied to a specific Lisa serial number, and thus can be used (run successfully) on any real and emulated Lisa. 
 Disclaimer: given that the Lisa OS source files are open-source and free-to-use now               
 (at https://info.computerhistory.org/apple-lisa-code), we believe that removing file copy         
@@ -65,11 +66,12 @@ python3 LisaFileSystemTool.py <command> <disk image file name>
 
 `LisaFileSystemToolPerFile.py` is a companion tool that **writes** files onto a disk image.
 It is a thin extension of `LisaFileSystemTool.py` (all the disk-image machinery code is imported
-from there; only the add/replace/delete-specific code lives in this file).
+from there; only the add/replace/put/delete-specific code lives in this file).
 
 ```
 python3 LisaFileSystemToolPerFile.py add     <disk image file name> <host file name> <lisa file name>
 python3 LisaFileSystemToolPerFile.py replace <disk image file name> <host file name> <lisa file name>
+python3 LisaFileSystemToolPerFile.py put     <disk image file name> <host file name> <lisa file name>
 python3 LisaFileSystemToolPerFile.py delete  <disk image file name> <lisa file name>
 ```
 
@@ -77,12 +79,15 @@ python3 LisaFileSystemToolPerFile.py delete  <disk image file name> <lisa file n
 |-----------|--------------|
 | `add`     | Adds the host file to the volume as a new file with the given Lisa name. A new s-file number, hint and data pages, and a catalog entry are allocated and written, and all affected checksums are fixed up. If a file with the same name already exists, nothing is written. |
 | `replace` | Replaces the contents of an existing file (found by name, case-insensitive) in place, reusing the file's existing sectors: if the new file is larger, only the extra sectors are newly allocated; if it is smaller, the unused old sectors are freed. If no file with that name exists, nothing is changed. |
+| `put`     | A convenient add-or-replace command. |
 | `delete`  | Deletes a regular file (found by name, case-insensitive): the catalog entry is removed, the file's data and hint pages are released to the free pool, and the s-list sentry is emptied, exactly as the OS `kill_sfile`/`Ddelete` paths do. On B-tree volumes the catalog record is removed with the OS b-tree deletion algorithm (including the underflow rebalancing: merge or rotate with the sibling, propagation up to the root, and tree-depth shrink when the root becomes empty); freed catalog nodes are zeroed and their pages returned to the free pool. On flat-catalog volumes the centry is cleared per the OS `KILL_ENTRY` rules (including entries that straddle catalog page boundaries). Directories and other non-file catalog entries are rejected. The MDDF counters (`filecount`, `freecount`, `fs_overhead`, `empty_file`, and — on B-tree volumes — `root_page`/`tree_depth`) are all kept consistent, and every affected sector's tag checksum and the DC42 checksums (if any) are fixed up. If the MDDF `tree_depth` field turns out to be stale (e.g. after an interrupted operation), it is corrected from the actual tree structure and a warning is printed. |
 
 Exit codes: `0` = success; `3` = nothing was done (`add`: a file with that name already exists /
 `replace`: no file with that name on the volume / `delete`: no file with that name on the volume);
 `1` = any other failure (including: `delete` given the name of a directory or other non-file
-catalog entry). 
+catalog entry). `put` never returns `3`: it always performs either the add or the replace, so
+for it `0` = done, `1` = failure (e.g. the host file does not exist, or the name exists only as
+a directory or other non-file catalog entry). 
 
 ### 1.3 Lisa Text File format
 
@@ -93,7 +98,7 @@ converted to the on-disk Lisa text layout : line endings become \r, the text is 
 all-zero 1024-byte header "page" prepended, and the stray trailing 0xFF byte that the Computer
 History Museum Lisa source archive text files have is stripped (if any). Together with the `dump`
 command of `LisaFileSystemTool.py` (which converts a .TEXT file back to host text), this makes
-`dump` → edit on the host → `add`/`replace` a good round trip.
+`dump` → edit on the host → `add`/`replace`/`put` a good round trip.
 
 ### 1.4 Accepted input files
 
