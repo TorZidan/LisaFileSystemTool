@@ -8,7 +8,7 @@
 # read below. This tool decodes it.                                                               #
 #                                                                                                 #
 # Usage:   python3 LisaSerialNumberTool.py <serial number>                                        #
-# Example: python3 LisaSerialNumberTool.py FF000000000000FF0010000100205D2C                       #
+# Example: python3 LisaSerialNumberTool.py ff028308104050ff0010163504700000                       #
 #                                                                                                 #
 # Author: TorZidan                                                                                #
 # Date: Sept 25, 2026                                                                             #
@@ -19,7 +19,7 @@ import sys
 
 
 def decode_16_byte_serial(serial_str: str):
-    """Decode an Apple Lisa VSROM (Video state ROM) serial number given as a 32-character hex string (e.g. "ff000000000000ff0000000000000000") (also known as 32 "nibbles") (which represents 16 bytes of data).
+    """Decode an Apple Lisa VSROM (Video state ROM) serial number given as a 32-character hex string (e.g. "ff028308104050ff0010163504700000") (also known as 32 "nibbles") (which represents 16 bytes of data).
 
     This is the format that the LisaEm emulator uses (In the File->Preferences menu).
 
@@ -48,7 +48,7 @@ def decode_16_byte_serial(serial_str: str):
         or not all(c in "0123456789abcdef" for c in serial_str)
     ):
         raise ValueError(
-            f"invalid serial number {serial_str!r}: expected exactly 32 hex characters, e.g. ff000000000000ff0000000000000000"
+            f"invalid serial number {serial_str!r}: expected exactly 32 hex characters, e.g. ff028308104050ff0010163504700000"
         )
 
     # The 32 bytes at offset 240 in the Lisa VSROM (one byte per nibble):
@@ -161,7 +161,7 @@ def main():
     if len(sys.argv) != 2:
         print("Usage: python3 LisaSerialNumberTool.py <Apple Lisa serial number>")
         print(
-            "The serial number is the 'compressed' 16-byte (32 hex character), as used by the LisaEm emulator, e.g. ff000000000000ff0000000000000000. See more info in the code."
+            "The serial number is the 'compressed' 16-byte (32 hex character), as used by the LisaEm emulator, e.g. ff028308104050ff0010163504700000. See more info in the code."
         )
         sys.exit(1)
 
