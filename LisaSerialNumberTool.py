@@ -154,6 +154,9 @@ def decode_16_byte_serial(serial_str: str):
         f"00000250: {serial_at_address_250}\n\n"
         # Note: we print these values in hex format below, and yet they come out just right:
         f"Decoded: Your Lisa was built in Apple Plant #{plant:x} on the {day:x} day of 19{year:x} with serial #{serial_number:04x}\n\n"
+
+        f"It probably looks like this on the Lisa label under the screen: B08B{year:02x}{day:03x}{serial_number:04x} (or A<some-seven-digit-number>)\n\n"
+
         f"AppleNet Number: {prefix:03x}-{net:05x} (machine_id {machine_id} / {machine_id:#010x})\n\n"
         f"{checksum_report}"
     )
