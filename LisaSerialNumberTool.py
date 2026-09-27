@@ -71,8 +71,8 @@ def decode_16_byte_serial(serial_str: str):
         | (serial_as_32_bytes[0x08])
     )
 
-    # Serial number possible range: 0..65535 (0xFFFF)
-    serial_number: int = (
+    # The unit number manufactured on that day:
+    daily_mfg_unit_number: int = (
         ((serial_as_32_bytes[0x09]) << 12)
         | ((serial_as_32_bytes[0x0A]) << 8)
         | ((serial_as_32_bytes[0x0B]) << 4)
@@ -153,9 +153,11 @@ def decode_16_byte_serial(serial_str: str):
         f"00000240: {serial_at_address_240}\n"
         f"00000250: {serial_at_address_250}\n\n"
         # Note: we print these values in hex format below, and yet they come out just right:
-        f"Decoded: Your Lisa was built in Apple Plant #{plant:x} on the {day:x} day of 19{year:x} with serial #{serial_number:04x}\n\n"
+        f"Decoded: Your Lisa was built in Apple Plant #{plant:x} on the {day:x} day of 19{year:x}, daily manufacturing unit number #{daily_mfg_unit_number:04x}\n\n"
 
-        f"It probably looks like this on the Lisa label under the screen: B08B{year:02x}{day:03x}{serial_number:04x} (or A<some-seven-digit-number>)\n\n"
+        # Lisa-s made before mid-1983 have printed serial numbers in the format B08B<two-last-year-digits><day-of-year-three-digits><daily-unit-number>
+        # Lisa-s made after  mid-1983 have printed serial numbers in the format A<last-year-digit><day-of-year-three-digits><daily-unit-number>
+        f"It probably looks like this on the Lisa label under the screen: B08B{year:02x}{day:03x}{daily_mfg_unit_number:04x} or A{year & 0xF:01x}{day:03x}{daily_mfg_unit_number:03x}\n\n"
 
         f"AppleNet Number: {prefix:03x}-{net:05x} (machine_id {machine_id} / {machine_id:#010x})\n\n"
         f"{checksum_report}"
