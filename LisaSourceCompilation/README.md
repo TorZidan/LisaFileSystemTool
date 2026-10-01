@@ -1,17 +1,16 @@
 
-# Uploading Lisa OS source files to a ProFile disk image and compiling them in Lisa Workshop
+# Uploading the Lisa OS source files to a ProFile disk image and compiling them in Lisa Workshop
 
 **Author:** [TorZidan](https://github.com/TorZidan)  
-**Last Updated:** Sept 26, 2026  
+**Last Updated:** Oct 1, 2026  
 
 ## Overview
 
-The presented `upload_files.sh` is a Linux shell script that "uploads" the (patched) Lisa OS source files onto the
-ProFile disk image **`LOS_Compilation_Base.image`**, so that you can boot the
-image in LisaEm (or on a real Lisa with an ESProfile) and compile the Lisa OS
-from source with Workshop.
+The presented `upload_files.sh` is a Linux shell script that "uploads" (copies) the (patched) Lisa Office System (aka LOS) source files onto the
+ProFile disk image **`LOS_Compilation_Base.image`** (included in this repository), so that you can boot the
+image in LisaEm (or on a real Lisa with an ESProfile) and compile the Lisa Ooffice System files (in the Workshop environment).
 
-The shell script uses the `../LisaFileSystemToolPerFile.py` tool (the `add` and
+The shell script uses the `../LisaFileSystemToolPerFile.py` tool  in the parent folder (the `add` and
 `replace` commands — see the project README, §1.3). 
 
 ## What the script does
@@ -24,22 +23,14 @@ Given the folder that contains the Lisa OS source tree (it must have
    this is done with the `replace` command).
 2. **Adds** the local [`MAKE-ALL_NODISKS2.TEXT`](MAKE-ALL_NODISKS2.TEXT)
    build script, stored on the image as `ALEX/MAKE/ALL_NODISKS2.TEXT`.
-3. **Adds 858 selected source files** from the source tree, from the
+   **Adds** the local [`MAKE-CLEAN.TEXT`](MAKE-CLEAN.TEXT)
+   build script, stored on the image as `ALEX/MAKE/CLEAN.TEXT`.
+4. **Adds 858 selected source files** from the source tree, from the
    `APPS/` subfolders (APBG, APCL, APDM, APEW, APHP, APIN, APLC, APLD,
    APLL, APLP, APLT, APLW, APPW) and from the `LISA_OS/` subfolders
    (BUILD, GUIDE_APIM, LIBS, OS, TKIN, TKALERT).
 
-That is **860 upload operations in total** (1 replace + 859 adds).
-
-The host files are unix-converted Lisa text files named `<name>.TEXT.unix.txt`
-(a few have slightly different names — e.g. lowercase `.text.unix.txt`, or a
-`.` instead of the usual `-` — which the script maps to the correct names on
-the image); on the disk image each one is stored under the Lisa file name
-`<name>.TEXT`.
-
-The script works on the image **in place** (it is not idempotent-safe to run
-twice expecting "860 added" — on a re-run the already-present files are
-simply counted as "already present", and that is *not* an error).
+All text file new-line symbols (\n or \r\n) are automatically converted to lisa-style new-lines (\r) during the upload.
 
 ## Why do we have to do this?
 Can't you share a disk image file with the Lisa OS source files already "uploaded" onto it?
@@ -64,8 +55,7 @@ The "replace" command does not have such bug, and is able to successfully replac
 ## Usage
 
 Prerequisites: a Linux host with `python3`, and this project's
-`LisaFileSystemToolPerFile.py` in the parent folder (unmodified relative
-layout).
+`LisaFileSystemToolPerFile.py` in the parent folder.
 
 1. Download `lisa-source.zip` from
    <https://info.computerhistory.org/apple-lisa-code> and unzip it.
@@ -83,19 +73,15 @@ layout).
 
    It should print `Successfully applied 248/248 patches`.
 
-4. Run the script, passing the folder that *contains* `Lisa_Source`:
+4. Run the script, passing the path to the`Lisa_Source` folder:
 
    ```
    ./upload_files.sh /path/to/folder-containing-Lisa_Source
    ```
-
-   (The script `cd`s into its own folder, so a relative argument is resolved
-   against the directory you invoke it from.)
-
    A successful first run ends with:
 
    ```
-   Done: 860 file(s) added, 0 already present, 0 failure(s).
+   Done: 861 file(s) added, 0 already present, 0 failure(s).
    ```
 
 5. Mount `LOS_Compilation_Base.image` in the LisaEm emulator, or on a real
