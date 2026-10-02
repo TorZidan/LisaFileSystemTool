@@ -1446,14 +1446,31 @@ class AddFileMixin:
         modified.add(slist_abs)
 
         # ---- insert the catalog centry into the rootcatalog data (slot found earlier) ----
+        # The rootcatalog is a contiguous stream of 54-byte entries, so the entry
+        # may straddle two 512-byte pages; split the write when it does (a plain
+        # cp[cbyte:cbyte+54] = ... would grow the bytearray past 512 bytes).
         centry_off = slot * 54
         cpage_idx = centry_off // 512
-        cpage_abs = mddf + chain[cpage_idx]
         cbyte = centry_off % 512
-        cp = bytearray(self.read_sector(cpage_abs))
-        cp[cbyte : cbyte + 54] = self._build_centry(name_bytes, new_sfile)
-        self._mem_write_sector_data(cpage_abs, bytes(cp))
-        modified.add(cpage_abs)
+        centry = self._build_centry(name_bytes, new_sfile)
+        if cbyte + 54 <= 512:
+            cpage_abs = mddf + chain[cpage_idx]
+            cp = bytearray(self.read_sector(cpage_abs))
+            cp[cbyte : cbyte + 54] = centry
+            self._mem_write_sector_data(cpage_abs, bytes(cp))
+            modified.add(cpage_abs)
+        else:
+            n1 = 512 - cbyte
+            cpage_abs = mddf + chain[cpage_idx]
+            cp = bytearray(self.read_sector(cpage_abs))
+            cp[cbyte:512] = centry[:n1]
+            self._mem_write_sector_data(cpage_abs, bytes(cp))
+            modified.add(cpage_abs)
+            cpage_abs = mddf + chain[cpage_idx + 1]
+            cp = bytearray(self.read_sector(cpage_abs))
+            cp[0 : 54 - n1] = centry[n1:]
+            self._mem_write_sector_data(cpage_abs, bytes(cp))
+            modified.add(cpage_abs)
 
         # ---- update the MDDF ----
         m = bytearray(self.read_sector(mddf))
@@ -2908,7 +2925,9 @@ class GetFileMixin(ReplaceFileMixin):
             )
             return 1
         else:  # 'not_found'
-            print(f"WARNING: no file named '{lisa_name}' on this volume; nothing to get.")
+            print(
+                f"WARNING: no file named '{lisa_name}' on this volume; nothing to get."
+            )
             return 3
 
         # ---- read the file's data (read-only) ----
@@ -3031,7 +3050,9 @@ if __name__ == "__main__":
     # host), so it does not need the confirmation.
     if command != "get":
         try:
-            proceed = file_system._confirm_proceed_if_disk_image_is_open_by_other_process()
+            proceed = (
+                file_system._confirm_proceed_if_disk_image_is_open_by_other_process()
+            )
         except EOFError:
             # No interactive terminal (stdin closed/redirected): don't prompt, just skip.
             print(
