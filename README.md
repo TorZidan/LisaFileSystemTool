@@ -59,7 +59,8 @@ python3 LisaFileSystemTool.py <command> <disk image file name>
 | `dump`      | Writes the contents of every file to the host folder **`/tmp/LisaFileSystemDump/`** (created if missing), preserving the names as stored on disk. The root catalog file itself is skipped, and "empty" file names are skipped. Text files (with file names ending with ".text" ) are dumped as plain host text: the 1024-byte on-disk header page and the null page padding are stripped, and the \r new-line symbols used by LOS are converted to \n, so no further conversion is needed. |
 | `dump-flatten` | Like `dump`, but a '/' in a Lisa file name is replaced with '-', so all files are dumped directly into **`/tmp/LisaFileSystemDump/`** (no subfolders). |
 | `deserialize` | Finds all theft-protected files (see §5.9), asks for y/N confirmation, then rewrites each file's hint sector (so the file can be opened on any machine), and fixes up all affected checksums. |
-| `fix_dc42_checksum`| For DC42 files: checks if the data and tag checksums are correct in the DC42 header, and fixes the incorrect ones, if any. |
+| `fix-dc42-checksum`| For DC42 files: checks if the data and tag checksums are correct in the DC42 header, and fixes the incorrect ones, if any. |
+| `rename-volume` | Renames the volume: rewrites the `volname` field (a Pascal string of up to 33 characters, Mac Roman) at offset 12 of the MDDF sector (see §4), then fixes up all affected checksums (the per-sector tag checksum for 20-byte tags, and the DC42 header checksums for DC42 files). The new name is given as the third command-line argument and is validated first (non-empty, ≤ 33 characters, no '/', Mac-Roman encodable); a y/N confirmation is asked before anything is written. |
 
 
 ### 1.2 LisaFileSystemToolPerFile.py  — adding, replacing, deleting and getting files
@@ -226,7 +227,7 @@ Key fields (byte offsets within the MDDF sector):
 | 0x00 | 2 | `fsversion` | file-system version: **14 = LOS 1.0** (`REL1_VERSION`), **15 = LOS 2.0** (`PEPSI_VERSION`), **16 = LOS 3.0**, **17 = LOS 3.1** (`SPRING_VERSION`). The tool accepts 14..17. |
 | 0x02 | 8 | `volid` | volume UID (two 32-bit longs) |
 | 0x0A | 2 | `volnum` | volume number |
-| 0x0C | 34 | `volname` | Pascal string, up to 33 chars |
+| 0x0C | 34 | `volname` | Pascal string, up to 33 chars (rewritten by the `rename-volume` command) |
 | 0x2E | 34 | `password` | volume password (Pascal string) |
 | 0x50 | 4 | `init_machine_id` | machine the volume was initialized on |
 | 0x54 | 4 | `master_machine_id` | "for theft protection" |
@@ -732,6 +733,7 @@ The maximum possible date is: 2037-02-06 06:28:15 GMT (i.e. value 0xFFFFFFFF = 4
 | `_locate_hint_page_for_sfile` | Validate/relocate a (possibly stale) hintaddr using the tag (`file_id = −s_file_id`, `rel_num = 0`). |
 | `find_protected_files` / `_find_protected_files_flat_catalog` | List all theft-protected files. |
 | `remove_file_protection` | `deserialize` command: clear `machine_id`/`protected`, fix tag + DC42 checksums. |
+| `rename_volume` | `rename-volume` command: validate the new name, rewrite the 34-byte `volname` Pascal string at MDDF offset 12, fix tag + DC42 checksums. |
 | `is_sector_free_in_bitmap` / `dump_bitmap_sectors` / `dump_free_bitmap_sectors_numbers` / `check_bitmap_for_all_file_data` | Allocation-bitmap inspection and consistency checks. |
 | `derive_mddf_sector_number_from_boot_sector_zero` | Reproduce the boot ROM/loader MDDF derivation (§3.5). |
 

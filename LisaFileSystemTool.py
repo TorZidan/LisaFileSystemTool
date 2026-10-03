@@ -891,6 +891,149 @@ class InMemoryFileSystem:
                 )
         print("Done.")
 
+    def rename_volume(self, new_volume_name: str):
+        """
+        Rename the volume: rewrite the "volname" field of the MDDF sector.
+
+        The volname field is a Pascal string occupying 34 bytes (1 length byte + up to
+        33 characters, Mac Roman) at offset 12 of the MDDF sector (see
+        MDDF_FIELD_DEFINITIONS). The new name is validated, then written to the MDDF
+        sector in the file on disk (and to the in-memory copy self._file), with the rest
+        of the 34-byte field zero-padded. Because the sector data changed, the per-sector
+        tag checksum (20-byte tags only) and the DC42 header checksums (DC42 images only)
+        are fixed up afterwards, exactly like remove_file_protection() does.
+
+        Raises ValueError if the new name is invalid (empty, longer than 33 characters,
+        contains a '/', or has characters outside the Mac Roman encoding).
+        """
+        # Validate the new name before touching anything:
+        if len(new_volume_name) == 0:
+            raise ValueError("the new volume name is empty.")
+        if len(new_volume_name) > 33:
+            raise ValueError(
+                f"the new volume name is {len(new_volume_name)} characters long, but the MDDF "
+                f"volname field holds at most 33 characters (max_ename)."
+            )
+        if "/" in new_volume_name:
+            raise ValueError(
+                "the new volume name contains a '/', which is not allowed in Lisa names."
+            )
+        try:
+            name_bytes = new_volume_name.encode("mac-roman")
+        except UnicodeEncodeError as e:
+            raise ValueError(
+                f"the new volume name contains characters that are not in the Mac Roman encoding ({e})."
+            )
+        if len(name_bytes) != len(new_volume_name):
+            # mac-roman is a single-byte encoding, so this should never happen, but be safe:
+            raise ValueError(
+                f"the new volume name could not be encoded as {len(new_volume_name)} Mac Roman bytes."
+            )
+
+        old_volume_name = pascal_to_string(self._mddf_sector_bytes[12:46])
+        if old_volume_name == new_volume_name:
+            print(
+                f"The volume is already named '{old_volume_name}'; nothing to do."
+            )
+            return
+
+        answer = input(
+            f"\nNow will rename the volume from '{old_volume_name}' to '{new_volume_name}'. This will modify the disk image file '{self._file_name}'. Trust me? [y/N] "
+        )
+        if answer.strip().lower() not in ("y", "yes"):
+            print("Aborted by user; the disk image was not modified.")
+            return
+
+        # Build the 34-byte Pascal string: 1 length byte + the name, zero-padded to 34 bytes.
+        volname_field = bytearray(34)
+        volname_field[0] = len(name_bytes)
+        volname_field[1 : 1 + len(name_bytes)] = name_bytes
+
+        if self._is_dc42_format:
+            sector_start_file_offset: int = (
+                DC42_HEADER_SIZE + self._mddf_sector_number * SECTOR_SIZE_IN_BYTES
+            )
+        else:
+            # The raw image file format is: a set of sectors, where each sector has 20-bytes tag data followed by 512 bytes sector data.
+            sector_start_file_offset: int = (
+                interleave5(self._mddf_sector_number)
+                * (SECTOR_SIZE_IN_BYTES + self._single_tag_size)
+                + self._single_tag_size
+            )
+        volname_file_offset = sector_start_file_offset + 12  # volname at offset 12 in the MDDF sector
+
+        print(
+            f"Renaming the volume from '{old_volume_name}' to '{new_volume_name}' in '{self._file_name}' ..."
+        )
+        try:
+            file_in_rw_mode = open(self._file_name, "r+b")
+        except OSError as e:
+            print(f"ERROR: cannot open '{self._file_name}' for writing: {e}")
+            return
+        with file_in_rw_mode:
+            # We write the same data to the file on disk and to the in-memory copy self._file, so that we can later compute the new tag checksum on the new in-memory data.
+            file_in_rw_mode.seek(volname_file_offset)
+            file_in_rw_mode.write(bytes(volname_field))
+            self._file.seek(volname_file_offset)
+            self._file.write(bytes(volname_field))
+
+            # Read the field back from disk (self._file is stale) to verify the change:
+            file_in_rw_mode.seek(volname_file_offset)
+            volname_readback = file_in_rw_mode.read(34)
+            if volname_readback == bytes(volname_field):
+                print(
+                    f"  Verified the new volname at file offset {volname_file_offset:#08x}: '{pascal_to_string(volname_readback)}' -> OK"
+                )
+            else:
+                print(
+                    f"  WARNING: verification FAILED for the new volname at file offset {volname_file_offset:#08x}!"
+                )
+
+            # The volname bytes written above change the sector data, so the per-sector tag
+            # checksum must be updated too -- but ONLY for 20-byte tags (hard-disk images):
+            # 12-byte floppy tags have NO checksum field (byte 11 is the low byte of the
+            # backward link, see calculate_new_tag_checksum()).
+            # For completeness, we update the tag checksum both in the file on disk and in the in-memory copy self._file, even though the latter is not strictly necessary.
+            if self._single_tag_size == 20:
+                new_tag_checksum = self.calculate_new_tag_checksum(
+                    self._mddf_sector_number
+                )
+                if self._is_dc42_format:
+                    tag_checksum_offset = (
+                        DC42_HEADER_SIZE
+                        + self._num_sectors * SECTOR_SIZE_IN_BYTES
+                        + self._mddf_sector_number * self._single_tag_size
+                        + 11
+                    )
+                else:
+                    # Raw image format: the tag immediately precedes its sector's data.
+                    tag_checksum_offset = (
+                        sector_start_file_offset - self._single_tag_size + 11
+                    )
+                file_in_rw_mode.seek(tag_checksum_offset)
+                file_in_rw_mode.write(bytes([new_tag_checksum]))
+                self._file.seek(tag_checksum_offset)
+                self._file.write(bytes([new_tag_checksum]))
+                file_in_rw_mode.seek(tag_checksum_offset)
+                tag_checksum_readback = file_in_rw_mode.read(1)[0]
+                if tag_checksum_readback == new_tag_checksum:
+                    print(
+                        f"  Updated tag checksum byte 11 to {new_tag_checksum:#04x} at file offset {tag_checksum_offset:#08x} -> OK"
+                    )
+                else:
+                    print(
+                        f"  WARNING: tag checksum read-back test failed: {tag_checksum_readback:#04x} != expected {new_tag_checksum:#04x} for MDDF sector {self._mddf_sector_number}!"
+                    )
+            else:
+                print(
+                    "  (12-byte floppy tags have no per-sector checksum; no tag update needed.)"
+                )
+
+        # Update the Data and Tags DC42 checksum values in the DC42 header (if this is a DC42 disk image file):
+        # they are now wrong because we changed the sector data.
+        # (No confirmation prompt: the user already confirmed above.)
+        self.fix_dc42_checksum(confirm=False)
+
     def calculate_new_tag_checksum(self, sector_number: int) -> int:
         """
         Calculates the per-sector tag checksum byte for a given sector number.
@@ -1200,6 +1343,25 @@ class InMemoryFileSystem:
 
         # read_and_print_bytes_in_hex_and_ascii(file, HEADER_SIZE + self._mddf_sector_number*512, 512)
         print(f"")
+
+    def mddf_volume_note(self) -> str:
+        """A one-line summary of the volume-size related fields of the MDDF sector:
+
+          * volsize = the "bitmapsize" field (4 bytes, big-endian, at offset 0x8C = 140):
+            the size of the allocation bitmap in bits, i.e. the total number of sectors in this
+            volume (one bit per sector). This is the number the Lisa OS / LisaEm reports as the
+            volume size when the disk image is mounted.
+          * free    = the "freecount" field (4 bytes, big-endian, at offset 0xBA = 186):
+            the number of free pages (sectors) in the volume.
+          * filecount, empty_file, maxfiles = the fields at offsets 0xB0, 0x9E and 0xA0.
+        """
+        return (
+            f"Note: MDDF says volsize={to_uint32_big_endian(self._mddf_sector_bytes, 140)}, "
+            f"free={to_uint32_big_endian(self._mddf_sector_bytes, 186)}, "
+            f"filecount={to_uint16_big_endian(self._mddf_sector_bytes, 176)}, "
+            f"empty_file={to_uint16_big_endian(self._mddf_sector_bytes, 158)}, "
+            f"maxfiles={to_uint16_big_endian(self._mddf_sector_bytes, 160)}."
+        )
 
     def print_allocation_bitmap_sector_info(
         self, file: BufferedReader, allocation_bitmap_sector_numbers: List[int]
@@ -2124,6 +2286,7 @@ class InMemoryFileSystem:
                 break
             current_page = next_page
 
+        print(self.mddf_volume_note())
         if file_rows:
             print()
             for line in format_table(
@@ -2783,9 +2946,7 @@ class InMemoryFileSystem:
         print(
             f"\nFlat catalog (fs_version {self._fs_version}): no B-tree catalog on this volume; listing files from the slist (sfile {first_sfile}..{last_sfile}) ..."
         )
-        print(
-            f"Note: MDDF says filecount={to_uint16_big_endian(self._mddf_sector_bytes, 176)}, empty_file={to_uint16_big_endian(self._mddf_sector_bytes, 158)}, maxfiles={to_uint16_big_endian(self._mddf_sector_bytes, 160)}."
-        )
+        print(self.mddf_volume_note())
         num_files = 0
         rows: list[list[str]] = []
         for s_file_id in range(first_sfile, last_sfile + 1):
@@ -3426,7 +3587,7 @@ def derive_mddf_sector_number_from_boot_sector_zero(
     fs_block0 = None
     if boot_id == 0xAAAA:
         print(
-            "\nBoot sector 0 uses the latest (LOS 2.0+) boot sector layout; fs_block0 is read from byte offset 14."
+            "\nBoot sector 0 uses the latest boot sector layout (used by LOS 2.0 to LOS 3.1); fs_block0 is read from byte offset 14."
         )
         fs_block0 = to_uint16_big_endian(boot_sector_bytes, 14)
     elif boot_sector_bytes[0:2] == b"\x4e\xfa":
@@ -3756,43 +3917,58 @@ if __name__ == "__main__":
         "visualize",
         "dump",
         "dump-flatten",
-        "fix_dc42_checksum",
+        "fix-dc42-checksum",
+        "rename-volume",
     )
 
-    if len(sys.argv) != 3:
-        print("Usage: python LisaFileSystemTool.py <command> <disk image file name>")
-        print("Available commands:")
-        print(
-            "  deserialize    Remove the theft-protection from all protected files found on the disk image."
-        )
-        print(
-            "  info           Print disk image info (file format, checksums, MDDF sector)."
-        )
-        print("  list           List the files on the disk image.")
-        print(
-            "  visualize      Print a one-character-per-sector map of the whole volume, 64 sectors per line"
-            " (B=boot, L=loader, M=MDDF, P=bitmap, S=s-record, C=catalog, H=hentry,"
-            " 9..2=data of the 8 largest files, 1=data of all other files, ?=unknown allocated, .=free)."
-        )
-        print(
-            "  dump           Dump all files from the disk image into folder /tmp/LisaFileSystemDump"
-            " (a '/' in a Lisa file name becomes a subfolder there)."
-        )
-        print(
-            "  dump-flatten   Like 'dump', but a '/' in a Lisa file name is replaced with a '-'"
-            ", so all files are dumped into the /tmp/LisaFileSystemDump folder (no subfolders are being created)."
-        )
-        print(
-            "                 Note: two file names that differ only by '/' vs '-' (e.g. 'a/b.txt'"
-            " and 'a-b.txt') map to the same host file; the one dumped later overwrites the earlier one."
-        )
-        print(
-            "  fix_dc42_checksum  Fix the DC42 header data/tags checksums, but only if they are wrong."
-        )
-        sys.exit(1)
-
-    command = sys.argv[1].strip().lower()
-    file_name = sys.argv[2]
+    command = sys.argv[1].strip().lower() if len(sys.argv) > 1 else ""
+    new_volume_name = None
+    if command == "rename-volume":
+        # The only command that takes an extra argument: the new volume name.
+        if len(sys.argv) != 4:
+            print(
+                "Usage: python LisaFileSystemTool.py rename-volume <disk image file name> <new volume name>"
+            )
+            sys.exit(1)
+        file_name = sys.argv[2]
+        new_volume_name = sys.argv[3]
+    else:
+        if len(sys.argv) != 3:
+            print("Usage: python LisaFileSystemTool.py <command> <disk image file name>")
+            print("Available commands:")
+            print(
+                "  deserialize    Remove the theft-protection from all protected files found on the disk image."
+            )
+            print(
+                "  info           Print disk image info (file format, checksums, MDDF sector)."
+            )
+            print("  list           List the files on the disk image.")
+            print(
+                "  visualize      Print a one-character-per-sector map of the whole volume, 64 sectors per line"
+                " (B=boot, L=loader, M=MDDF, P=bitmap, S=s-record, C=catalog, H=hentry,"
+                " 9..2=data of the 8 largest files, 1=data of all other files, ?=unknown allocated, .=free)."
+            )
+            print(
+                "  dump           Dump all files from the disk image into folder /tmp/LisaFileSystemDump"
+                " (a '/' in a Lisa file name becomes a subfolder there)."
+            )
+            print(
+                "  dump-flatten   Like 'dump', but a '/' in a Lisa file name is replaced with a '-'"
+                ", so all files are dumped into the /tmp/LisaFileSystemDump folder (no subfolders are being created)."
+            )
+            print(
+                "                 Note: two file names that differ only by '/' vs '-' (e.g. 'a/b.txt'"
+                " and 'a-b.txt') map to the same host file; the one dumped later overwrites the earlier one."
+            )
+            print(
+                "  fix-dc42-checksum  Fix the DC42 header data/tags checksums, but only if they are wrong."
+            )
+            print(
+                "  rename-volume    Rename the volume: rewrite the 'volname' field (a Pascal string of up to"
+                " 33 characters) at offset 12 of the MDDF sector, and fix up all affected checksums."
+            )
+            sys.exit(1)
+        file_name = sys.argv[2]
 
     if command not in available_commands:
         print(
@@ -3841,12 +4017,26 @@ if __name__ == "__main__":
         file_system.dump_files()
     elif command == "dump-flatten":
         file_system.dump_files(flatten=True)
-    elif command == "fix_dc42_checksum":
+    elif command == "fix-dc42-checksum":
         try:
             file_system.fix_dc42_checksum()
         except EOFError:
             # No interactive terminal (stdin closed/redirected): don't prompt, just skip the fix.
             print(
                 "No interactive terminal for the confirmation prompt; skipping the DC42 checksum fix."
+            )
+    elif command == "rename-volume":
+        try:
+            if file_system._confirm_proceed_if_disk_image_is_open_by_other_process():
+                file_system.rename_volume(new_volume_name)
+            else:
+                print("Aborted by user; the disk image was not modified.")
+        except ValueError as e:
+            print(f"ERROR: {e} The disk image was not modified.")
+            sys.exit(1)
+        except EOFError:
+            # No interactive terminal (stdin closed/redirected): don't prompt, just skip.
+            print(
+                "No interactive terminal for the confirmation prompt; skipping rename_volume()."
             )
     # That's all, Folks!
