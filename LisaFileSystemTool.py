@@ -427,7 +427,7 @@ class InMemoryFileSystem:
 
         """
         target_path = os.path.abspath(self._file_name)
-        for proc in psutil.process_iter(['pid', 'name']):
+        for proc in psutil.process_iter(["pid", "name"]):
             try:
                 for f in proc.open_files():
                     if os.path.abspath(f.path) == target_path:
@@ -503,7 +503,7 @@ class InMemoryFileSystem:
         # num_bitmap_sectors = to_uint16_big_endian(mddf_sector_bytes, 146)
         # for absolute_sector_number in range(9000, 9200):
         #     is_butmap_sector_free = self.is_sector_free_in_bitmap(absolute_bitmap_start_sector_number, num_bitmap_sectors, absolute_sector_number)
-        #     print(f"\n###################################################### Checking if sector {absolute_sector_number} is marked as free in the allocation bitmap: {'YES' if is_butmap_sector_free else 'NO'}")
+        #     print(f"\nChecking if sector {absolute_sector_number} is marked as free in the allocation bitmap: {'YES' if is_butmap_sector_free else 'NO'}")
 
         # if self.is_flat_catalog_volume():
         #     # fs_version 14/15 (LOS 1.0 / LOS 2.0) volumes have no B-tree catalog:
@@ -1341,7 +1341,7 @@ class InMemoryFileSystem:
         )  # Each bitmap sector covers 4096 data sectors (512 bytes x 8 bits/byte = 4096 bits)
         if relative_bitmap_sector_num >= num_bitmap_sectors:
             print(
-                f"############################ Warning: The total number of bitmap sectors is {num_bitmap_sectors}, but we are reaching beyond that, at relative sector number {relative_bitmap_sector_num} (zero-based)"
+                f"WARNING: The total number of bitmap sectors is {num_bitmap_sectors}, but we are reaching beyond that, at relative sector number {relative_bitmap_sector_num} (zero-based)"
             )
         byte_index = int((rel_sector_number - relative_bitmap_sector_num * 4096) / 8)
         if byte_index < 0 or byte_index > 4095:
@@ -1746,7 +1746,7 @@ class InMemoryFileSystem:
 
                     if is_sector_free_in_bitmap:
                         print(
-                            f"################### This ain't right: sector {next_abs_sector_to_read:#6} is marked as free in the bitmap, but it is used by file '{file_name}' !"
+                            f"WARNING: sector {next_abs_sector_to_read:#6} is marked as free in the bitmap, but it is used by file '{file_name}' !"
                         )
                         # raise ValueError("This ain't right ...")
 
@@ -1798,7 +1798,9 @@ class InMemoryFileSystem:
 
         # ---- Step 1: enumerate the files from the slist --------------------------
         file_sizes: dict[int, int] = {}  # s_file_id -> filesize (only files with data)
-        file_names: dict[int, str] = {}  # s_file_id -> name (best effort, from hintaddr)
+        file_names: dict[int, str] = (
+            {}
+        )  # s_file_id -> name (best effort, from hintaddr)
         slist_addr = to_uint32_big_endian(mddf_bytes, 0x94)
         slist_packing = to_uint16_big_endian(mddf_bytes, 0x98)
         slist_block_count = to_uint16_big_endian(mddf_bytes, 0x9A)
@@ -1840,7 +1842,8 @@ class InMemoryFileSystem:
 
         def is_allocated(abs_sector: int) -> bool:
             """True if the sector is marked as allocated in the allocation bitmap.
-            Sectors outside the bitmap's coverage (e.g. before the MDDF sector) count as free."""
+            Sectors outside the bitmap's coverage (e.g. before the MDDF sector) count as free.
+            """
             rel = abs_sector - mddf_sector_number
             if rel < 0 or rel >= len(bitmap) * 8:
                 return False
@@ -1850,8 +1853,8 @@ class InMemoryFileSystem:
         if self._is_dc42_format:
             # In DC42 images the tags form one contiguous block right after all the sector data:
             tag_region = self._file_bytes[
-                DC42_HEADER_SIZE + num_sectors * SECTOR_SIZE_IN_BYTES :
                 DC42_HEADER_SIZE
+                + num_sectors * SECTOR_SIZE_IN_BYTES : DC42_HEADER_SIZE
                 + num_sectors * (SECTOR_SIZE_IN_BYTES + tag_size)
             ]
             tag_region += b"\xff" * (num_sectors * tag_size - len(tag_region))
@@ -1864,8 +1867,9 @@ class InMemoryFileSystem:
             file_ids = [
                 int.from_bytes(
                     self._file_bytes[
-                        interleave5(i) * (SECTOR_SIZE_IN_BYTES + tag_size) + 4 :
-                        interleave5(i) * (SECTOR_SIZE_IN_BYTES + tag_size) + 6
+                        interleave5(i) * (SECTOR_SIZE_IN_BYTES + tag_size)
+                        + 4 : interleave5(i) * (SECTOR_SIZE_IN_BYTES + tag_size)
+                        + 6
                     ],
                     "big",
                 )
@@ -1914,19 +1918,31 @@ class InMemoryFileSystem:
             "Sector map: one character per sector, 64 sectors per line "
             "(the number in front of each line is the first sector number of that line):"
         )
-        print("   B = boot sector,\n   L = loader sector,\n   M = MDDF sector,\n   P = allocation bitmap sector,")
-        print("   S = s-record (slist) sector,\n   C = B-tree catalog sector,\n   H = hint (hentry) sector,")
+        print(
+            "   B = boot sector,\n   L = loader sector,\n   M = MDDF sector,\n   P = allocation bitmap sector,"
+        )
+        print(
+            "   S = s-record (slist) sector,\n   C = B-tree catalog sector,\n   H = hint (hentry) sector,"
+        )
         if ranked_files:
             for rank, (s_file_id, size) in enumerate(ranked_files[:8]):
                 name = file_names.get(s_file_id, "?")
-                print(f"   {9 - rank} = File'{name}' ({size} bytes, s_file_id {s_file_id}),")
+                print(
+                    f"   {9 - rank} = File'{name}' ({size} bytes, s_file_id {s_file_id}),"
+                )
         else:
-            print("   9..2 = data sectors of the largest files (no files with data found in the slist),")
+            print(
+                "   9..2 = data sectors of the largest files (no files with data found in the slist),"
+            )
         if len(ranked_files) > 8:
-            print(f"   1 = data sectors of all other files ({len(ranked_files) - 8} more file(s) with data),")
+            print(
+                f"   1 = data sectors of all other files ({len(ranked_files) - 8} more file(s) with data),"
+            )
         else:
             print("   1 = data sectors of all other files,")
-        print("   ? = allocated sector of unknown kind (tag says free, or names a file not in the slist),")
+        print(
+            "   ? = allocated sector of unknown kind (tag says free, or names a file not in the slist),"
+        )
         print("   . = free sector")
         print()
 
@@ -2044,9 +2060,7 @@ class InMemoryFileSystem:
                 break
             current_page = child_page
         if not descended_to_leaf:
-            print(
-                f"################# Could not descend to a leaf node; found no catalog entries. ##############"
-            )
+            print(f"Could not descend to a leaf node; found no catalog entries.")
             return
 
         # Step 2: walk the chain of leaf nodes, dumping all records
@@ -2066,7 +2080,7 @@ class InMemoryFileSystem:
             node_kind = node_bytes[(4 * 512) - 2]  # kind @ 2046
 
             print(
-                f"###################################################################### At catalog leaf node at relative page {current_page} "
+                f"At catalog leaf node at relative page {current_page} "
                 f"(absolute sector {self._mddf_sector_number + current_page}) with file_id={self.get_file_id_type_from_tag_data_for_sector(self._mddf_sector_number + current_page)}, "
                 f"num_catalog_entries={num_entries}"
             )
@@ -2117,9 +2131,27 @@ class InMemoryFileSystem:
                 file_rows,
             ):
                 print(line)
-        print(
-            f"################# Found {num_files_found} files, {num_directories_found} directories, {num_threads_found} thread entries and {num_other_found} other catalog entries. ##############"
+
+        mddf_filecount = to_uint16_big_endian(self._mddf_sector_bytes, 176)
+        num_entries_found = (
+            num_files_found
+            + num_directories_found
+            + num_threads_found
+            + num_other_found
         )
+
+        if num_entries_found == (
+            mddf_filecount - 3
+        ):  # The MDDF filecount always has 3 more files than the ones discovered here
+            print(
+                f"Found {num_files_found} files, {num_directories_found} directories, {num_threads_found} thread entries and {num_other_found} other catalog entries."
+                f" The MDDF says filecount={mddf_filecount} (3 more), which is correct and expected."
+            )
+        else:
+            print(
+                f"WARNING: found {num_entries_found} catalog entries ({num_files_found} files, {num_directories_found} directories, {num_threads_found} threads, {num_other_found} other) in the B-tree catalog,"
+                f" but based on the filecount in the MDDF we should have found {mddf_filecount} - 3 = {mddf_filecount-3} files!"
+            )
 
     def find_protected_files(self) -> list[int]:
         """
@@ -2174,9 +2206,7 @@ class InMemoryFileSystem:
                 break
             current_page = child_page
         if not descended_to_leaf:
-            print(
-                f"################# Could not descend to a leaf node; found no files. ##############"
-            )
+            print(f"Could not descend to a leaf node; found no files.")
             return protected_hint_sector_numbers
 
         # Step 2: walk the chain of leaf nodes, checking every file entry:
@@ -2523,12 +2553,18 @@ class InMemoryFileSystem:
 
     def _flat_catalog_sfile_range(self):
         """Returns (first_sfile, last_sfile) to scan: all sfiles that may hold a file.
-        On flat-catalog volumes the MDDF's first_file points at the rootcatalog itself,
-        so we scan from sfile 1 to empty_file-1 and skip the unused (hintaddr=0) slots.
+        We scan the whole slist (1 .. slist_packing*slist_block_count-1) and let the
+        callers skip the unused (hintaddr=0) slots.
+        Do NOT bound the scan by the MDDF's empty_file field: on some real volumes it
+        is stale, which would make us miss some files.
         """
         mddf_sector_bytes = self._mddf_sector_bytes
-        empty_file = to_uint16_big_endian(mddf_sector_bytes, 158)
-        return (1, empty_file - 1)
+        slist_packing = to_uint16_big_endian(mddf_sector_bytes, 0x98)
+        slist_block_count = to_uint16_big_endian(mddf_sector_bytes, 0x9A)
+        if slist_packing == 0 or slist_block_count == 0:
+            empty_file = to_uint16_big_endian(mddf_sector_bytes, 158)
+            return (1, empty_file - 1)
+        return (1, slist_packing * slist_block_count - 1)
 
     def _locate_hint_page_for_sfile(self, s_file_id: int, hint_sector_number: int):
         """Verify that the hint_sector_number really is the hint page of the given s-file, by looking at  tag data.
@@ -2786,13 +2822,31 @@ class InMemoryFileSystem:
                 ]
             )
         if rows:
+            rows.sort(
+                key=lambda row: row[1].lower()
+            )  # sort by file name, case-insensitive
             print()
             for line in format_table(
                 ["s_file_id", "file_name", "size", "created", "last_modified"],
                 rows,
             ):
+                # Print each file:
                 print(line)
-        print(f"Found {num_files} file(s) in the slist.")
+            print()
+            if any(row[1].lower() == "rootcatalog" for row in rows):
+                print("Note: Lisa Workshop will not show the file 'rootcatalog'")
+
+        mddf_filecount = to_uint16_big_endian(self._mddf_sector_bytes, 176)
+        if num_files == (
+            mddf_filecount - 3
+        ):  # The MDDF filecount always has 3 more files than the ones discovered here
+            print(
+                f"Found {num_files} file(s) in the slist. The MDDF says filecount={mddf_filecount} (3 more), which is correct and expected."
+            )
+        else:
+            print(
+                f"WARNING: found {num_files} file(s) in the slist, but based on the filecount in the MDDF we should have found {mddf_filecount} - 3 = {mddf_filecount-3} files!"
+            )
 
     def flat_catalog_dump_catalog(self):
         """Dump the flat (hashed) catalog of this fs_version 14/15 volume: it is the data of
@@ -2814,7 +2868,8 @@ class InMemoryFileSystem:
         num_slots = len(data) // 54
         if num_slots != rootmaxentries:
             print(
-                f"WARNING: the rootcatalog data has {len(data)} bytes = {num_slots} x 54-byte records, but the MDDF says rootmaxentries={rootmaxentries}. Continuing with {num_slots} slots."
+                f"WARNING: the rootcatalog data has {len(data)} bytes = {num_slots} x 54-byte records, "
+                f"but the MDDF says rootmaxentries={rootmaxentries}. Continuing with {num_slots} slots."
             )
         cetype_names = {
             0: "emptyentry",
@@ -3568,7 +3623,7 @@ def format_date(date_as_int: int) -> str:
     and converted GMT -> local time for display (Convert_Time in timemgr,
     LISA_OS/GUIDE_APIM/apim-tsettime.TEXT.unix.txt), which we approximate here
     with the system's local timezone.
-    
+
     But how is "the system's local timezone" edited and where is it stored?
     Is it possible that the keyboard layout (e.g. French) is used to determine the the system's local timezone?
     """
