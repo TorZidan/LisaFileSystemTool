@@ -290,6 +290,28 @@ class AddFileMixin:
         self._file.seek(off)
         self._file.write(tag_bytes)
 
+    def _flush_modified_sectors(self, modified: set):
+        """Write every modified sector (data + tag) to the image file on disk.
+
+        With 20-byte tags (hard disk images) the per-sector tag checksum byte
+        (offset 11) is recomputed and patched in the same pass; 12-byte tags
+        (floppy images) have no checksum byte, so their tags are written as
+        is. The in-memory copy (self._file) is kept in sync either way.
+        """
+        with open(self._file_name, "r+b") as fw:
+            for sn in sorted(modified):
+                d = self.read_sector(sn)
+                tg = self.read_tags_for_sector(sn)
+                if self._single_tag_size == 20:
+                    ck = self.calculate_new_tag_checksum(sn)
+                    tg = tg[:11] + bytes([ck]) + tg[12:]
+                    self._file.seek(self._sector_tag_file_offset(sn) + 11)
+                    self._file.write(bytes([ck]))  # keep the in-memory copy in sync
+                fw.seek(self._sector_data_file_offset(sn))
+                fw.write(d)
+                fw.seek(self._sector_tag_file_offset(sn))
+                fw.write(tg)
+
     def _bitmap_free_pages(self) -> List[int]:
         """Return the sorted list of FREE MDDF-relative page numbers, from the allocation bitmap.
 
@@ -335,8 +357,13 @@ class AddFileMixin:
                     "the tag chain is corrupted (a loop?)"
                 )
             tag = self.read_tags_for_sector(mddf + rel)
-            fwd = (tag[0x0E] << 16) | (tag[0x0F] << 8) | tag[0x10]
-            if fwd == 0xFFFFFF:
+            if self._single_tag_size == 20:
+                fwd = (tag[0x0E] << 16) | (tag[0x0F] << 8) | tag[0x10]
+                end = 0xFFFFFF
+            else:
+                fwd = ((tag[8] << 8) | tag[9]) & 0x7FF
+                end = 0x7FF
+            if fwd == end:
                 break
             rel = fwd
         return chain
@@ -352,32 +379,59 @@ class AddFileMixin:
         fwdlink: int,
         bkwdlink: int,
     ) -> bytes:
-        """Build a 20-byte ProFile/hard-disk sector tag.
+        """Build a sector tag in this volume's tag format.
 
-        fwdlink/bkwdlink are MDDF-relative page numbers, or 0xFFFFFF (END).
-        dataused_bytes is the number of valid bytes (0..512); the high bit (cksum
-        present) is set. The checksum byte (offset 11) is left 0 and patched later
-        by calculate_new_tag_checksum().
+        20-byte tag (ProFile/hard disk): fwdlink/bkwdlink are MDDF-relative
+        page numbers, or 0xFFFFFF (END). dataused_bytes is the number of valid
+        bytes (0..512); the high bit (cksum present) is set. The checksum byte
+        (offset 11) is left 0 and patched later by calculate_new_tag_checksum().
+
+        12-byte tag (Sony 400K floppy; layout per FINISH_READ in
+        SOURCE-SONYASM.TEXT.unix.txt, verified against real 400K images):
+            version(2) vol_id(2) file_id(2) relpage(2)
+            bytes 8-9:   dataused_hi(5 bits) + fwd_link(11 bits)
+            bytes 10-11: dataused_lo(5 bits) + bkwd_link(11 bits)
+        where the links are MDDF-relative page numbers and 0x07FF is the
+        "no link" sentinel, and dataused_bytes = dataused_hi * 32 +
+        dataused_lo (a full page is 16*32+0; a 146-byte last page is 4*32+18).
+        There is no checksum byte and no absolute-page field (abspage is
+        ignored).
         """
-        END = 0xFFFFFF
-        t = bytearray(20)
+        if self._single_tag_size == 20:
+            END = 0xFFFFFF
+            t = bytearray(20)
+            struct.pack_into(">H", t, 0, version & 0xFFFF)
+            struct.pack_into(">H", t, 2, volume & 0xFFFF)
+            struct.pack_into(">H", t, 4, fileid & 0xFFFF)
+            struct.pack_into(">H", t, 6, (0x8000 | (dataused_bytes & 0x7FFF)) & 0xFFFF)
+            t[8] = (abspage >> 16) & 0xFF
+            t[9] = (abspage >> 8) & 0xFF
+            t[10] = abspage & 0xFF
+            t[11] = 0  # checksum placeholder
+            struct.pack_into(">H", t, 12, relpage & 0xFFFF)
+            f = fwdlink if fwdlink != END else END
+            t[14] = (f >> 16) & 0xFF
+            t[15] = (f >> 8) & 0xFF
+            t[16] = f & 0xFF
+            b = bkwdlink if bkwdlink != END else END
+            t[17] = (b >> 16) & 0xFF
+            t[18] = (b >> 8) & 0xFF
+            t[19] = b & 0xFF
+            return bytes(t)
+        END = 0x7FF
+        t = bytearray(12)
         struct.pack_into(">H", t, 0, version & 0xFFFF)
         struct.pack_into(">H", t, 2, volume & 0xFFFF)
         struct.pack_into(">H", t, 4, fileid & 0xFFFF)
-        struct.pack_into(">H", t, 6, (0x8000 | (dataused_bytes & 0x7FFF)) & 0xFFFF)
-        t[8] = (abspage >> 16) & 0xFF
-        t[9] = (abspage >> 8) & 0xFF
-        t[10] = abspage & 0xFF
-        t[11] = 0  # checksum placeholder
-        struct.pack_into(">H", t, 12, relpage & 0xFFFF)
-        f = fwdlink if fwdlink != END else END
-        t[14] = (f >> 16) & 0xFF
-        t[15] = (f >> 8) & 0xFF
-        t[16] = f & 0xFF
-        b = bkwdlink if bkwdlink != END else END
-        t[17] = (b >> 16) & 0xFF
-        t[18] = (b >> 8) & 0xFF
-        t[19] = b & 0xFF
+        struct.pack_into(">H", t, 6, relpage & 0xFFFF)
+        f = fwdlink if fwdlink != 0xFFFFFF else END
+        b = bkwdlink if bkwdlink != 0xFFFFFF else END
+        du_hi = (dataused_bytes // 32) & 0x1F
+        du_lo = (dataused_bytes % 32) & 0x1F
+        t[8] = (du_hi << 3) | ((f >> 8) & 0x07)
+        t[9] = f & 0xFF
+        t[10] = (du_lo << 3) | ((b >> 8) & 0x07)
+        t[11] = b & 0xFF
         return bytes(t)
 
     def _group_runs(self, pages: List[int]) -> List[tuple]:
@@ -1161,18 +1215,7 @@ class AddFileMixin:
                 modified.add(mddf + bitmap_addr + i)
 
         # ---- flush modified sectors to disk, patching tag checksums in one pass ----
-        with open(self._file_name, "r+b") as fw:
-            for sn in sorted(modified):
-                d = self.read_sector(sn)
-                tg = self.read_tags_for_sector(sn)
-                ck = self.calculate_new_tag_checksum(sn)
-                tg = tg[:11] + bytes([ck]) + tg[12:]
-                self._file.seek(self._sector_tag_file_offset(sn) + 11)
-                self._file.write(bytes([ck]))  # keep the in-memory copy in sync
-                fw.seek(self._sector_data_file_offset(sn))
-                fw.write(d)
-                fw.seek(self._sector_tag_file_offset(sn))
-                fw.write(tg)
+        self._flush_modified_sectors(modified)
 
         self.fix_dc42_checksum(confirm=False)
 
@@ -1221,8 +1264,10 @@ class AddFileMixin:
                 f"ERROR: add supports flat-catalog (fs_version 14/15) and b-tree (fs_version 16/17) volumes; this volume is fs_version {self._fs_version}."
             )
             return 1
-        if self._single_tag_size != 20:
-            print("ERROR: add currently supports only 20-byte-tag (hard disk) images.")
+        if self._single_tag_size not in (12, 20):
+            print(
+                f"ERROR: add currently supports only 20-byte-tag (hard disk) and 12-byte-tag (floppy) images; this image has {self._single_tag_size}-byte tags."
+            )
             return 1
         if not os.path.isfile(host_file_path):
             print(f"ERROR: host file '{host_file_path}' not found.")
@@ -1378,22 +1423,35 @@ class AddFileMixin:
         struct.pack_into(">I", h, 0x2E, now)  # DTC (created)
         struct.pack_into(">I", h, 0x32, now)  # DTA (accessed)
         struct.pack_into(">I", h, 0x36, now)  # DTM (modified)
-        # ---- hint page 1: the smallmap / file map ----
+        # ---- the smallmap / file map ----
+        # The file map lives on hint page `map_offset` at byte offset
+        # `smallmap_off` (MDDF 0x114): on classic fs 14/15 volumes that is
+        # offset 0 of hint page 1; on hintsize-1 volumes (like this 400K
+        # floppy) it is inlined at offset 0x80 of hint page 0, next to the
+        # hentry (the same layout b-tree volumes use).
+        smallmap_off = self._mddf_u16(0x114)
         sm = bytearray(512)
-        struct.pack_into(">I", sm, 0, num_data_pages)  # size = number of data pages
-        struct.pack_into(">H", sm, 4, 83)  # max_entries = MAXMAPINDEX (old_volume)
+        maxent = 9 if smallmap_off else 83  # inlined smallmap: room for 9 runs, as in the OS
+        struct.pack_into(">I", sm, smallmap_off, num_data_pages)  # size = number of data pages
+        struct.pack_into(">H", sm, smallmap_off + 4, maxent)  # max_entries
         runs = self._group_runs(data_pages)
-        struct.pack_into(">H", sm, 6, len(runs))  # ecount
+        struct.pack_into(">H", sm, smallmap_off + 6, len(runs))  # ecount
         for i, (st, cnt) in enumerate(runs[:9]):
-            struct.pack_into(">I", sm, 8 + i * 6, st)
-            struct.pack_into(">H", sm, 8 + i * 6 + 4, cnt)
+            struct.pack_into(">I", sm, smallmap_off + 8 + i * 6, st)
+            struct.pack_into(">H", sm, smallmap_off + 8 + i * 6 + 4, cnt)
         if map_offset >= hintsize:
             print(
                 f"ERROR: map_offset ({map_offset}) is beyond hintsize ({hintsize}); cannot place the file map."
             )
             return 1
-        # hentry on hint page 0; smallmap / file map on hint page `map_offset` (1 for fs 14/15).
+        # hentry on hint page 0; smallmap / file map on hint page `map_offset`
+        # at byte offset `smallmap_off` (offset 0 of hint page 1 for fs 14/15).
         hint_page_data = {0: bytes(h), map_offset: bytes(sm)}
+        if map_offset == 0:
+            # hentry and smallmap share hint page 0: merge them
+            page0 = bytearray(h)
+            page0[smallmap_off:] = sm[smallmap_off:]
+            hint_page_data[0] = bytes(page0)
         for i, p in enumerate(hint_pages):
             absn = mddf + p
             self._mem_write_sector_data(absn, hint_page_data.get(i, bytes(512)))
@@ -1497,18 +1555,7 @@ class AddFileMixin:
                 modified.add(mddf + bitmap_addr + i)
 
         # ---- flush modified sectors to disk, patching tag checksums in one pass ----
-        with open(self._file_name, "r+b") as fw:
-            for sn in sorted(modified):
-                d = self.read_sector(sn)
-                tg = self.read_tags_for_sector(sn)
-                ck = self.calculate_new_tag_checksum(sn)
-                tg = tg[:11] + bytes([ck]) + tg[12:]
-                self._file.seek(self._sector_tag_file_offset(sn) + 11)
-                self._file.write(bytes([ck]))  # keep the in-memory copy in sync
-                fw.seek(self._sector_data_file_offset(sn))
-                fw.write(d)
-                fw.seek(self._sector_tag_file_offset(sn))
-                fw.write(tg)
+        self._flush_modified_sectors(modified)
 
         self.fix_dc42_checksum(confirm=False)
 
@@ -1535,7 +1582,6 @@ class _LocatedFile:
       'file'        exactly one file entry with the name: sfile is its
                     s-file number, leaf/idx/rec its b-tree record (all None
                     on flat-catalog volumes), slot the centry's index in
-                    the rootcatalog (flat-catalog volumes)
       'directory'   the name exists only as a directory (b-tree volumes) or
                     as a non-file catalog entry (flat volumes; cetype holds
                     the entry's type)
@@ -1744,9 +1790,9 @@ class ReplaceFileMixin(AddFileMixin):
                 f"ERROR: replace supports flat-catalog (fs_version 14/15) and b-tree (fs_version 16/17) volumes; this volume is fs_version {self._fs_version}."
             )
             return 1
-        if self._single_tag_size != 20:
+        if self._single_tag_size not in (12, 20):
             print(
-                "ERROR: replace currently supports only 20-byte-tag (hard disk) images."
+                f"ERROR: replace currently supports only 20-byte-tag (hard disk) and 12-byte-tag (floppy) images; this image has {self._single_tag_size}-byte tags."
             )
             return 1
         if not os.path.isfile(host_file_path):
@@ -1932,7 +1978,7 @@ class ReplaceFileMixin(AddFileMixin):
                 )
                 return 1
             map_abs = mddf + old_hintaddr + map_offset
-            sm_off = 0
+            sm_off = smallmap_off  # 0 on classic volumes; 0x80 on hintsize-1 volumes
         sm = bytearray(self.read_sector(map_abs))
         maxent = struct.unpack(">H", sm[sm_off + 4 : sm_off + 6])[0]
         runs = self._group_runs(data_pages)
@@ -2008,18 +2054,7 @@ class ReplaceFileMixin(AddFileMixin):
                 modified.add(mddf + bitmap_addr + i)
 
         # ---- flush modified sectors to disk, patching tag checksums in one pass ----
-        with open(self._file_name, "r+b") as fw:
-            for sn in sorted(modified):
-                d = self.read_sector(sn)
-                tg = self.read_tags_for_sector(sn)
-                ck = self.calculate_new_tag_checksum(sn)
-                tg = tg[:11] + bytes([ck]) + tg[12:]
-                self._file.seek(self._sector_tag_file_offset(sn) + 11)
-                self._file.write(bytes([ck]))  # keep the in-memory copy in sync
-                fw.seek(self._sector_data_file_offset(sn))
-                fw.write(d)
-                fw.seek(self._sector_tag_file_offset(sn))
-                fw.write(tg)
+        self._flush_modified_sectors(modified)
 
         self.fix_dc42_checksum(confirm=False)
 
@@ -2045,8 +2080,11 @@ class DeleteFileMixin(ReplaceFileMixin):
       * the catalog entry is removed (flat: the 54-byte centry is cleared with
         the removed/emptyentry bookkeeping of KILL_ENTRY; b-tree: the record is
         deleted and the tree rebalanced by merge/rotate as in Ddelete);
-      * all of the file's data pages are freed in the allocation bitmap (their
-        contents and tags are left in place, exactly as the OS does);
+      * all of the file's data pages are freed in the allocation bitmap, taken
+        from the file map's entries (kill_sfile -> FMAP_MGR FMRELEASE ->
+        deallocate per map entry; the map is the OS's source of truth and the
+        tag chain is only the fallback when the map cannot be read), with the
+        pages' contents and tags left in place, exactly as the OS does;
       * the hint pages are freed and their tags cleared (fileid 0, version 0,
         dataok with 0 bytes used, relpage 0, fwd/bkwd END) as in RELEASEPAGES;
       * the slist sentry is emptied (hintaddr/fileaddr/filesize 0, version+1);
@@ -2070,40 +2108,71 @@ class DeleteFileMixin(ReplaceFileMixin):
                     "the tag chain is corrupted (a loop?)"
                 )
             tag = self.read_tags_for_sector(mddf + rel)
-            fwd = (tag[0x0E] << 16) | (tag[0x0F] << 8) | tag[0x10]
-            if fwd == 0xFFFFFF:
+            if self._single_tag_size == 20:
+                fwd = (tag[0x0E] << 16) | (tag[0x0F] << 8) | tag[0x10]
+                end = 0xFFFFFF
+            else:
+                fwd = ((tag[8] << 8) | tag[9]) & 0x7FF
+                end = 0x7FF
+            if fwd == end:
                 break
             rel = fwd
         return chain
 
-    def _file_map_page_set(
+    def _file_map_all_pages(
         self, hint_pages: List[int], is_btree: bool, smallmap_off: int, map_offset: int
-    ):
-        """The set of MDDF-relative data pages listed in the file's map
-        (smallmap at smallmap_off in hint page 0 on b-tree volumes, map at
-        offset 0 of hint page map_offset on flat volumes), or None if the map
-        cannot be read."""
+    ) -> Optional[List[int]]:
+        """All MDDF-relative data pages listed in the file's COMPLETE file map
+        (every map page, in map order). The walk mirrors the OS's FMAP_IO/
+        GetMapEntry: the first section is the smallmap at byte offset
+        smallmap_off of hint page 0 (b-tree volumes) or of hint page
+        map_offset (flat volumes); the remaining sections are full filemaps at
+        byte 0 of their pages, chained through the tag fwdlinks until END.
+        Returns None if the map cannot be read (so the caller can fall back to
+        the data tag chain)."""
         if not hint_pages:
             return None
         mddf = self._mddf_sector_number
         if is_btree:
             if not (0x80 <= smallmap_off <= 0x100):
                 return None
-            absn, off = mddf + hint_pages[0], smallmap_off
+            first, off = hint_pages[0], smallmap_off
         else:
             if map_offset >= len(hint_pages):
                 return None
-            absn, off = mddf + hint_pages[map_offset], 0
-        sm = self.read_sector(absn)
-        if off + 8 > len(sm):
-            return None
-        size, maxent, ecount = struct.unpack(">IHH", sm[off : off + 8])
-        pages = set()
-        for i in range(min(ecount, maxent)):
-            if off + 8 + i * 6 + 6 > len(sm):
+            first, off = hint_pages[map_offset], smallmap_off
+        pages: List[int] = []
+        visited = set()
+        rel = first
+        # the map pages are hint pages, so the map cannot span more pages than
+        # the hint chain; a longer walk means a corrupted (looping) chain
+        for _ in range(len(hint_pages)):
+            if rel in visited:
+                return None  # the map chain loops: the map is corrupted
+            visited.add(rel)
+            sm = self.read_sector(mddf + rel)
+            if off + 8 > len(sm):
+                return None
+            _size, maxent, ecount = struct.unpack(">IHH", sm[off : off + 8])
+            for i in range(min(ecount, maxent)):
+                if off + 8 + i * 6 + 6 > len(sm):
+                    break
+                st, cnt = struct.unpack(
+                    ">IH", sm[off + 8 + i * 6 : off + 14 + i * 6]
+                )
+                if st and cnt:
+                    pages.extend(range(st, st + cnt))
+            tag = self.read_tags_for_sector(mddf + rel)
+            if self._single_tag_size == 20:
+                fwd = (tag[0x0E] << 16) | (tag[0x0F] << 8) | tag[0x10]
+                end = 0xFFFFFF
+            else:
+                fwd = ((tag[8] << 8) | tag[9]) & 0x7FF
+                end = 0x7FF
+            if fwd == end:
                 break
-            st, cnt = struct.unpack(">IH", sm[off + 8 + i * 6 : off + 14 + i * 6])
-            pages.update(range(st, st + cnt))
+            rel = fwd
+            off = 0  # later map pages hold a full filemap at byte 0
         return pages
 
     def _bt_search_to_leaf(self, key: bytes):
@@ -2431,9 +2500,9 @@ class DeleteFileMixin(ReplaceFileMixin):
                 f"ERROR: delete supports flat-catalog (fs_version 14/15) and b-tree (fs_version 16/17) volumes; this volume is fs_version {self._fs_version}."
             )
             return 1
-        if self._single_tag_size != 20:
+        if self._single_tag_size not in (12, 20):
             print(
-                "ERROR: delete currently supports only 20-byte-tag (hard disk) images."
+                f"ERROR: delete currently supports only 20-byte-tag (hard disk) and 12-byte-tag (floppy) images; this image has {self._single_tag_size}-byte tags."
             )
             return 1
         max_name = BTREE_MAX_NAME if is_btree else FLAT_MAX_NAME
@@ -2551,28 +2620,44 @@ class DeleteFileMixin(ReplaceFileMixin):
                 f"hintsize {hintsize}; using the chain."
             )
 
-        # ---- data pages: the tag chain from fileaddr ----
-        # (the OS frees data pages without touching their contents or tags)
+        # ---- data pages: the file map (the OS's source of truth) ----
+        # The OS frees a killed file's data pages from the FILE MAP, not the
+        # tag chain: kill_sfile reads the map, and FMAP_MGR FMRELEASE walks
+        # every map entry, deallocating each entry's pages in the bitmap and
+        # adding the total to the MDDF freecount (the pages' contents and tags
+        # are left in place). A broken tag chain (a page missing its link to
+        # the next run) would therefore leak the unlinked pages if the chain
+        # were used, so the map's pages are freed instead. The tag chain is
+        # still read as a cross-check, and is the fallback when the map cannot
+        # be read at all.
         try:
-            data_pages = self._data_page_chain(fileaddr) if fileaddr else []
+            chain_pages = self._data_page_chain(fileaddr) if fileaddr else []
         except RuntimeError as e:
             print(f"ERROR: {e}")
             return 1
         expected = (filesize + 511) // 512
-        if len(data_pages) != expected:
+        if len(chain_pages) != expected:
             print(
-                f"NOTE: the tag chain of '{lisa_name}' has {len(data_pages)} page(s) but the sentry says "
-                f"{filesize} bytes ({expected} page(s)); using the chain."
+                f"NOTE: the tag chain of '{lisa_name}' has {len(chain_pages)} page(s) but the sentry says "
+                f"{filesize} bytes ({expected} page(s))."
             )
-        # cross-check against the file map, like replace does
-        map_pages = self._file_map_page_set(
+        map_pages = self._file_map_all_pages(
             hint_pages, is_btree, smallmap_off, map_offset
         )
-        if map_pages is not None and set(data_pages) != map_pages:
+        if map_pages is None:
+            data_pages = chain_pages
             print(
-                f"NOTE: the file map of '{lisa_name}' lists {len(map_pages)} page(s) but the tag chain has "
-                f"{len(data_pages)}; freeing the chain's pages."
+                f"NOTE: the file map of '{lisa_name}' could not be read; freeing the tag chain's "
+                f"{len(chain_pages)} page(s) instead (the OS frees the map's pages)."
             )
+        else:
+            data_pages = map_pages
+            if set(data_pages) != set(chain_pages):
+                print(
+                    f"NOTE: the file map of '{lisa_name}' lists {len(set(data_pages))} page(s) but the "
+                    f"tag chain has {len(set(chain_pages))}; freeing the map's pages, as the OS does "
+                    "(FMAP_MGR FMRELEASE)."
+                )
         # a corrupted chain may repeat pages; free each page once
         seen = set()
         uniq = []
@@ -2646,10 +2731,15 @@ class DeleteFileMixin(ReplaceFileMixin):
             t = bytearray(self.read_tags_for_sector(absn))
             t[0:2] = b"\x00\x00"  # version := 0
             t[4:6] = b"\x00\x00"  # fileid := 0
-            t[6:8] = b"\x80\x00"  # datastat := dataok, dataused := 0
-            t[12:14] = b"\x00\x00"  # relpage := 0
-            t[14:17] = b"\xff\xff\xff"  # fwdlink := END
-            t[17:20] = b"\xff\xff\xff"  # bkwdlink := END
+            if self._single_tag_size == 20:
+                t[6:8] = b"\x80\x00"  # datastat := dataok, dataused := 0
+                t[12:14] = b"\x00\x00"  # relpage := 0
+                t[14:17] = b"\xff\xff\xff"  # fwdlink := END
+                t[17:20] = b"\xff\xff\xff"  # bkwdlink := END
+            else:
+                t[6:8] = b"\x00\x00"  # relpage := 0
+                t[8:10] = b"\x07\xff"  # dataused := 0, fwdlink := END
+                t[10:12] = b"\x07\xff"  # dataused := 0, bkwdlink := END
             self._mem_write_sector_tag(absn, bytes(t))
             modified.add(absn)
 
@@ -2668,7 +2758,7 @@ class DeleteFileMixin(ReplaceFileMixin):
                 )
             else:
                 map_abs, map_off = (
-                    (mddf + hint_pages[map_offset], 0)
+                    (mddf + hint_pages[map_offset], smallmap_off)
                     if map_offset < len(hint_pages)
                     else (None, 0)
                 )
@@ -2756,18 +2846,7 @@ class DeleteFileMixin(ReplaceFileMixin):
                 modified.add(mddf + bitmap_addr + i)
 
         # ---- flush modified sectors to disk, patching tag checksums in one pass ----
-        with open(self._file_name, "r+b") as fw:
-            for sn in sorted(modified):
-                d = self.read_sector(sn)
-                tg = self.read_tags_for_sector(sn)
-                ck = self.calculate_new_tag_checksum(sn)
-                tg = tg[:11] + bytes([ck]) + tg[12:]
-                self._file.seek(self._sector_tag_file_offset(sn) + 11)
-                self._file.write(bytes([ck]))  # keep the in-memory copy in sync
-                fw.seek(self._sector_data_file_offset(sn))
-                fw.write(d)
-                fw.seek(self._sector_tag_file_offset(sn))
-                fw.write(tg)
+        self._flush_modified_sectors(modified)
 
         self.fix_dc42_checksum(confirm=False)
 
