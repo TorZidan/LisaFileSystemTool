@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-List the intrinsic unit names and numbers stored in a Lisa Pascal
-INTRINSIC.LIB file and compare them with the units *and* the code
-segments referenced by a Workshop object file (.OBJ).
+Prints the shared (also known as 'intrinsic') libraries used by a Lisa executable file (present on the given disk image).
 
-Both files are read from a Lisa disk image (DC42 or raw ProFile), whose
-name is the first command-line argument; the second argument is the name
-of the .OBJ file as stored on the volume. The name of the INTRINSIC.LIB
-file is hard-coded (INTRINSIC_LIB_NAME). The reading is done with the
-code of LisaFileSystemTool.py / LisaFileSystemToolPerFile.py
-(FileSystemWithPerFileCommands and its read_file_as_bytes() method).
+Usage: 
+    python3 AnalyzeLisaExecutableFile.py <disk image file name> <name of executable .OBJ file>
+
+It reads the specified executable file (e.g. EDITOR.OBJ) and the INTRINSIC.LIB
+file from the specified  Lisa disk image file.
+The name of the INTRINSIC.LIB file is hard-coded (INTRINSIC_LIB_NAME).
 
 The parsing operates on the files' contents as plain `bytes` objects
 (file_as_bytes), not on host file names, so switching back to ordinary
@@ -17,11 +15,12 @@ files on the computer's file system is a one-line change: replace the
 read_file_from_disk_image() calls in analyze() with
 `open(host_file_name, "rb").read()`.
 
-Both file types are big-endian.
+Note: Some of this info can be printed by the Workshop utility DUMPOBJ.OBJ.
+
 
 Background
 ----------
-A Workshop / Lisa Pascal program does not carry the code of the intrinsic
+A Workshop / Lisa Pascal program does not contain the code of the intrinsic
 units it uses.  It is dynamically linked against the shared intrinsic
 library (INTRINSIC.LIB and its companion library files).  The object file
 therefore holds two reference tables:
@@ -220,11 +219,25 @@ def _read_seg_run(data: bytes, start: int) -> list[tuple[int, str, int, bytes]]:
 
 def find_segment_table(data: bytes) -> tuple[int | None, list[tuple[int, str, int, bytes]]]:
     """
-    Locate the program's segment table (a run of 18-byte entries).
+    Locate the program's segment table in the object file.
 
-    Returns (start_offset, entries) or (None, []).  When several
-    candidate runs exist, the one containing PASLIB1 (segment 17) is
-    preferred, then the longest.
+    The table is a contiguous run of 18-byte entries:
+        8 bytes:  segment name, space-padded (mixed case)
+        2 bytes:  segment number (may carry a 0x2000 flag bit)
+        8 bytes:  "descriptor", which the caller may split further into so-called
+                  "Version1" and "Version12" fields, as reported by the DUMPOBJ.OBJ Workshop utility.
+
+    The file carries no marker for the table, so candidate runs are
+    found by scanning for stretches of at least two entries that each
+    pass _seg_entry_ok() (plausible name + segment number in range).
+    When several candidates exist, the one containing PASLIB1 (segment
+    17, present in virtually every program) is preferred; otherwise
+    the longest run wins.
+
+    Returns (start_offset, entries), where entries is a list of one
+    (offset, name, segment_number, descriptor) tuple per entry, with
+    the descriptor being the raw 8 bytes of the entry's last field.
+    Returns (None, []) if no candidate run is found.
     """
     n = len(data)
     candidates = []
@@ -361,14 +374,13 @@ def scan_obj(file_as_bytes: bytes, file_name: str = "<obj>") -> dict[str, Any]:
     """
     data = file_as_bytes
 
-    print(f"\n\n=== Executable .OBJ FILE: {file_name} ===")
-    print(f"Size: {len(data)} bytes")
+    print(f"\n\n=== EXECUTABLE FILE: {file_name} (of size: {len(data)} bytes) ===")
 
     # ---- unit table -------------------------------------------------
     unit_entries = []
     marker, count = find_unit_table(data)
     if marker is None or count is None:
-        print("No valid unit table found (9b 00 marker).")
+        print(f"No valid unit table found (9b 00 marker) in file {file_name}.")
     else:
         table_start = marker + 8
         for i in range(count):
@@ -400,7 +412,7 @@ def scan_obj(file_as_bytes: bytes, file_name: str = "<obj>") -> dict[str, Any]:
     seg_entries : list[tuple[int, str, int, bytes]] = []
     seg_start, segs = find_segment_table(data)
     if seg_start is None:
-        print("\nNo segment table found.")
+        print(f"\nNo segment table found in file {file_name}. The file may not be a Lisa executable file.")
     else:
         seg_entries = segs
         print(
@@ -408,16 +420,18 @@ def scan_obj(file_as_bytes: bytes, file_name: str = "<obj>") -> dict[str, Any]:
             f"-- code segments loaded from the shared library:"
         )
         print("--------------------------------------------------------------")
-        for off, name, num, desc in seg_entries:
+        for off, name, segment_num, descriptor in seg_entries:
+            version1 = descriptor[1:4]
+            version2 = descriptor[5:]
             print(
                 f"offset 0x{off:06X}: "
-                f"{name:<12} "
-                f"segment={num} "
-                f"desc={desc.hex(' ')}"
+                f"{name:<12}   "
+                f"segment={segment_num:04X}   "
+                f"Version1={version1.hex().upper()}   Version2={version2.hex().upper()}"
             )
         print(
             "Note: each entry above is 18 bytes long: "
-            "8 bytes for name, 2 bytes for segment number and 8 bytes for descriptor."
+            "8 bytes for name, 2 bytes for segment number, 1 byte for ???, 3 bytes for Version1, 1 byte for ???, 3 bytes for Version2."
         )
 
     return {"units": unit_entries, "segments": seg_entries}
@@ -453,8 +467,7 @@ def scan_intrinsic_lib(file_as_bytes: bytes, file_name: str = "<lib>") -> dict[s
     """
     data = file_as_bytes
 
-    print(f"\n\n\n=== INTRINSIC LIBRARY: {file_name} ===")
-    print(f"Size: {len(data)} bytes")
+    print(f"\n\n\n=== INTRINSIC LIBRARY: {file_name} (of size: {len(data)} bytes) ===")
 
     # Parse the type -> library file-name table first, so the unit and
     # segment dumps below can annotate each record with its library file.
@@ -498,28 +511,30 @@ def scan_intrinsic_lib(file_as_bytes: bytes, file_name: str = "<lib>") -> dict[s
     if seg_marker is None:
         print("\nSegment directory not found (9c 00 marker).")
     else:
-        for off, name, num_raw, num, desc, extra in segs:
+        for off, name, segment_num_raw, segment_num, descriptor, extra in segs:
             typ = extra[1] if len(extra) >= 2 else 0
-            seg_entries.append((off, name, num_raw, num, desc, extra, typ))
+            seg_entries.append((off, name, segment_num_raw, segment_num, descriptor, extra, typ))
         print(
             f"\nSegment directory (marker '{SEG_LIB_MARKER.hex(' ')}' found at 0x{seg_marker:06X}, "
             f"dir at 0x{seg_dir:06X}, {len(seg_entries)} records):"
         )
         print("--------------------------------------------------------------")
-        for off, name, num_raw, num, desc, extra, typ in seg_entries:
+        for off, name, segment_num_raw, segment_num, descriptor, extra, typ1 in seg_entries:
+            version1 = descriptor[1:4]
+            version2 = descriptor[5:]
             libname = type_table.get(typ, "Unknown library file")
             print(
                 f"offset 0x{off:06X}: "
                 f"{name:<12} "
-                f"segment={num:<4} "
+                f"segment={segment_num:04X}   "
                 f"type={typ:<3} "
-                f"({libname:<14}) "
-                f"desc={desc.hex(' ')}"
+                f"({libname:<14})   "
+                f"   Version1={version1.hex().upper()}   Version2={version2.hex().upper()}"
             )
         print(
             "Note: each record above is 28 bytes long: 8 bytes for name, "
-            "2 bytes for segment number, 8 bytes for descriptor "
-            "and 10 bytes for extra - the type byte is the 2nd byte of "
+            "2 bytes for segment number, 1 byte for ???, 3 bytes for Version1, 1 byte for ???, 3 bytes for Version2, "
+            "10 bytes for extra - the type byte is the 2nd byte of "
             "that extra field (record offset 19)."
         )
 
@@ -642,10 +657,9 @@ class LisaExecutableFileAnalyzer(FileSystemWithPerFileCommands):
         print("\n\n\n=== COMPARISON ===")
 
         if not requested_units:
-            print("\nNo unit references were detected in the OBJ file.")
-            print("The file may not be a Lisa Pascal object file.")
+            print(f"\nNo unit references were detected in file {actual_obj_name}. The file may not be a Lisa executable file.")
         else:
-            print(f"\nUnits referenced by OBJ file '{actual_obj_name}':")
+            print(f"\nUnits referenced by executable file '{actual_obj_name}':")
             print("-------------------------")
             for name, obj_unit in sorted(requested_units.items()):
                 if name in available_units:
@@ -657,28 +671,28 @@ class LisaExecutableFileAnalyzer(FileSystemWithPerFileCommands):
                         f"{status} {type_note(lib_type)}"
                     )
                 else:
-                    print(f"{name:<12} Unit-in-OBJ={obj_unit:<4} Unit-in-LIB=---- MISSING")
-                    print(f"{name:<12} Unit-in-OBJ={obj_unit:<4} Unit-in-LIB=---- MISSING")
-                    print(f"{name:<12} Unit-in-OBJ={obj_unit:<4} UnitInLILIB=---- MISSING")
+                    print(f"{name:<12} Unit-in-OBJ={obj_unit:<4}   Unit-in-LIB=---- MISSING")
+                    print(f"{name:<12} Unit-in-OBJ={obj_unit:<4}   Unit-in-LIB=---- MISSING")
+                    print(f"{name:<12} Unit-in-OBJ={obj_unit:<4}   UnitInLILIB=---- MISSING")
 
-            print(f"\nSegments needed by OBJ file '{actual_obj_name}' (code loaded from the shared library):")
+            print(f"\nSegments needed by executable file '{actual_obj_name}':")
             print("--------------------------------------------------------------")
             if not requested_segs:
                 print("(none found)")
-            for name, obj_seg in sorted(requested_segs.items()):
-                seg_bit = bool(obj_seg & 0x2000)
+            for name, seg_num_in_obj in sorted(requested_segs.items()):
+                seg_bit = bool(seg_num_in_obj & 0x2000)
                 if name in available_segs:
-                    lib_seg = available_segs[name]
+                    seg_num_in_lib = available_segs[name]
                     lib_type = available_seg_types[name]
-                    status = "OK(Segment numbers match)" if obj_seg == lib_seg else "!!!!! SEGMENT NUMBERS MISMATCH !!!!!"
+                    status = "OK(Segment numbers match)" if seg_num_in_obj == seg_num_in_lib else "!!!!! SEGMENT NUMBERS MISMATCH !!!!!"
                     print(
-                        f"{name:<12} Segment-in-OBJ={obj_seg:<4} Segment-in-LIB={lib_seg:<4} "
+                        f"{name:<12} Segment-in-OBJ={seg_num_in_obj:04X}   Segment-in-LIB={seg_num_in_lib:04X}   "
                         f"{status} {type_note(lib_type)}"
                     )
                 else:
                     print(
-                        f"{name:<12} Segment-in-OBJ={obj_seg:<4} "
-                        f"Segment-in-LIB=---- (not in INTRINSIC.LIB; user segment or other library)"
+                        f"{name:<12} Segment-in-OBJ={seg_num_in_obj:04X}   "
+                        f"Segment-in-LIB=---- (not in INTRINSIC.LIB; user segment or other library)  "
                     )   
 
         # ---- group units and segments by library (type byte) -----------
@@ -737,7 +751,7 @@ class LisaExecutableFileAnalyzer(FileSystemWithPerFileCommands):
 def main() -> None:
     if len(sys.argv) != 3:
         print(
-            "Prints the shared (aka intrinsic) libraries used by a Lisa executable file (present on the given disk image).\n"
+            "Prints the shared (also known as 'intrinsic') libraries used by a Lisa executable file (present on the given disk image).\n"
             "Usage:\n"
             "    python3 AnalyzeLisaExecutableFile.py <disk image file name> <name of executable .OBJ file>"
         )
