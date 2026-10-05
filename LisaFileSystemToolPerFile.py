@@ -15,6 +15,10 @@
 #   python LisaFileSystemToolPerFile.py put      <disk image file name> <host file> <lisa file name> #
 #   python LisaFileSystemToolPerFile.py delete   <disk image file name> <lisa file name>             #
 #   python LisaFileSystemToolPerFile.py get      <disk image file name> <lisa file name> <host file> #
+#                                                                                                    #
+# GetFileMixin also provides read_file_as_bytes(lisa_name), which performs the same read as the      #
+# "get" command but returns the file's data as a bytes object instead of writing a host file; other  #
+# tools (e.g. AnalyzeLisaExecutableFile.py) use it to read files straight from a disk image.        #
 #                                                                                                   #
 # THIS IS EXPERIMENTAL CODE !!!                                                                     #
 #                                                                                                   #
@@ -23,7 +27,7 @@
 # License: Published under the GNU General Public License v3.0.                                     #
 #####################################################################################################
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import os
 import struct
 import sys
@@ -1581,7 +1585,11 @@ class _LocatedFile:
     status is one of:
       'file'        exactly one file entry with the name: sfile is its
                     s-file number, leaf/idx/rec its b-tree record (all None
-                    on flat-catalog volumes), slot the centry's index in
+                    on flat-catalog volumes), slot the centry's index in the
+                    rootcatalog (flat-catalog volumes only), and name the
+                    file's name exactly as stored on the volume (the lookup
+                    is case-insensitive, so it may differ in case from
+                    lisa_name)
       'directory'   the name exists only as a directory (b-tree volumes) or
                     as a non-file catalog entry (flat volumes; cetype holds
                     the entry's type)
@@ -1602,6 +1610,7 @@ class _LocatedFile:
         count: int = 0,
         cetype: Optional[int] = None,
         slot: Optional[int] = None,
+        name: Optional[str] = None,
     ):
         self.status = status
         self.sfile = sfile
@@ -1611,6 +1620,7 @@ class _LocatedFile:
         self.count = count
         self.cetype = cetype
         self.slot = slot
+        self.name = name
 
 
 class ReplaceFileMixin(AddFileMixin):
@@ -1732,7 +1742,8 @@ class ReplaceFileMixin(AddFileMixin):
             if file_matches:
                 leaf, idx, rec = file_matches[0]
                 sfile = struct.unpack(">H", rec[38:40])[0]
-                return _LocatedFile("file", sfile=sfile, leaf=leaf, idx=idx, rec=rec)
+                name = rec[3:35].split(b"\x00", 1)[0].decode("mac-roman", errors="replace")
+                return _LocatedFile("file", sfile=sfile, leaf=leaf, idx=idx, rec=rec, name=name)
             if dir_matches:
                 return _LocatedFile("directory")
             return _LocatedFile("not_found")
@@ -1748,7 +1759,8 @@ class ReplaceFileMixin(AddFileMixin):
         if cetype != 3:  # a directory or other non-file entry
             return _LocatedFile("directory", cetype=cetype)
         sfile = struct.unpack(">H", centry[36:38])[0]
-        return _LocatedFile("file", sfile=sfile, slot=slot)
+        name = centry[1 : 1 + centry[0]].decode("mac-roman", errors="replace")
+        return _LocatedFile("file", sfile=sfile, slot=slot, name=name)
 
     def replace_file(self, host_file_path: str, lisa_name: str) -> int:
         """Replace the contents of an EXISTING file on this volume with the
@@ -1865,6 +1877,11 @@ class ReplaceFileMixin(AddFileMixin):
             sfile = located.sfile
             leaf = located.leaf  # None on flat volumes
             idx = located.idx  # None on flat volumes
+            if located.name is not None and located.name != lisa_name:
+                print(
+                    f"NOTE: the file on the volume is actually named '{located.name}' "
+                    "(the name lookup is case-insensitive)."
+                )
         elif located.status == "multiple":
             print(
                 f"ERROR: {located.count} files are named '{lisa_name}' on this volume (in "
@@ -2546,6 +2563,11 @@ class DeleteFileMixin(ReplaceFileMixin):
         located = self._locate_named_file(lisa_name)
         if located.status == "file":
             sfile = located.sfile
+            if located.name is not None and located.name != lisa_name:
+                print(
+                    f"NOTE: the file on the volume is actually named '{located.name}' "
+                    "(the name lookup is case-insensitive)."
+                )
             if is_btree:
                 # the delete needs the search path, so re-derive the leaf by
                 # tree search and cross-check it against the scan
@@ -2913,7 +2935,7 @@ class PutFileMixin(DeleteFileMixin):
 
 
 class GetFileMixin(ReplaceFileMixin):
-    """The "get" command: get_file().
+    """The "get" command: get_file() and read_file_as_bytes().
 
     get = save a file from the volume to a host file (the inverse of
     add/replace/put): locate a regular file by name (case-insensitive) with
@@ -2923,22 +2945,30 @@ class GetFileMixin(ReplaceFileMixin):
     sector tagged +s_file_id), and write the bytes to the host file,
     overwriting it if it exists.
 
+    read_file_as_bytes() performs exactly the same locate + read, but
+    returns the file's data as a bytes object instead of writing a host
+    file, so other tools (e.g. AnalyzeLisaExecutableFile.py) can consume files
+    straight from a disk image. Both share the logic in
+    _read_named_file_bytes().
+
     ".TEXT" files are converted back to plain host text with
     lisa_text_file_to_host_text() (the inverse of
     build_lisa_text_file_data()), exactly like the "dump" command of
     LisaFileSystemTool.py.
 
-    The disk image is only read, never written, so get does not need the
+    The disk image is only read, never written, so neither method needs the
     "is the image open by another process" confirmation the modifying
     commands ask for.
 
-    Returns the exit code to use: 0 on success, 3 if no file with that
-    name is on the volume, and 1 on any other failure.
+    get_file returns the exit code to use: 0 on success, 3 if no file with
+    that name is on the volume, and 1 on any other failure.
     """
 
-    def get_file(self, lisa_name: str, host_file_path: str) -> int:
-        """Save the file named lisa_name from this volume to the host file
-        host_file_path, overwriting the host file if it exists.
+    def _read_named_file_bytes(
+        self, lisa_name: str
+    ) -> Tuple[Optional[bytes], int, int, int]:
+        """Locate the file named lisa_name and read its full data. The disk
+        image is only read, never written.
 
         The file is located by name (case-insensitive) with the shared
         read-only locator _locate_named_file(): on b-tree volumes every
@@ -2961,53 +2991,61 @@ class GetFileMixin(ReplaceFileMixin):
         plain host text (header page and null page padding stripped, CR
         line endings become "\n", DLE leading-space codes expanded).
 
-        The disk image is not modified at all.
-
-        Returns the exit code to use: 0 on success, 3 if no file with that
-        name is on the volume, and 1 on any other failure.
+        Returns a 4-tuple (data, sfile, filesize, exit_code):
+          * data: the file's bytes (".TEXT" files already converted back to
+            plain host text), or None on failure;
+          * sfile: the located s-file number (0 on failure);
+          * filesize: the slist's on-disk size of the file (0 on failure);
+          * exit_code: 0 on success, 3 if no file with that name is on the
+            volume, and 1 on any other failure (a message is printed).
         """
         # ---- preconditions (same as add/replace/delete) ----
         if self._fs_version not in (14, 15, 16, 17):
             print(
-                f"ERROR: get supports flat-catalog (fs_version 14/15) and b-tree (fs_version 16/17) volumes; this volume is fs_version {self._fs_version}."
+                f"ERROR: reading files supports flat-catalog (fs_version 14/15) and b-tree (fs_version 16/17) volumes; this volume is fs_version {self._fs_version}."
             )
-            return 1
+            return None, 0, 0, 1
         if not lisa_name:
             print("ERROR: the Lisa file name is empty.")
-            return 1
+            return None, 0, 0, 1
 
         # ---- locate the file (read-only) ----
         located = self._locate_named_file(lisa_name)
         if located.status == "file":
             sfile = located.sfile
+            if located.name is not None and located.name != lisa_name:
+                print(
+                    f"NOTE: the file on the volume is actually named '{located.name}' "
+                    "(the name lookup is case-insensitive)."
+                )
         elif located.status == "multiple":
             print(
                 f"ERROR: {located.count} files are named '{lisa_name}' on this volume (in "
-                "different directories); cannot tell which one to get."
+                "different directories); cannot tell which one to read."
             )
-            return 1
+            return None, 0, 0, 1
         elif located.status == "directory":
             if not self.is_flat_catalog_volume():
                 print(
                     f"ERROR: a catalog entry named '{lisa_name}' exists on this volume but it is a "
-                    "directory, not a file; it cannot be saved to a host file by this command."
+                    "directory, not a file; it cannot be read by this command."
                 )
             else:
                 print(
                     f"ERROR: a catalog entry named '{lisa_name}' exists on this volume but is not a "
-                    f"regular file (cetype = {located.cetype}); it cannot be saved to a host file by this command."
+                    f"regular file (cetype = {located.cetype}); it cannot be read by this command."
                 )
-            return 1
+            return None, 0, 0, 1
         elif located.status == "bad_catalog":
             print(
                 "ERROR: could not read the rootcatalog; the volume's metadata is inconsistent."
             )
-            return 1
+            return None, 0, 0, 1
         else:  # 'not_found'
             print(
-                f"WARNING: no file named '{lisa_name}' on this volume; nothing to get."
+                f"WARNING: no file named '{lisa_name}' on this volume; nothing to read."
             )
-            return 3
+            return None, 0, 0, 3
 
         # ---- read the file's data (read-only) ----
         sentry = self._slist_entry(sfile)
@@ -3015,13 +3053,13 @@ class GetFileMixin(ReplaceFileMixin):
             print(
                 f"ERROR: the slist has no entry for s-file {sfile}; the volume's metadata is inconsistent."
             )
-            return 1
+            return None, 0, 0, 1
         _hintaddr, _fileaddr, filesize, _version = sentry
         try:
             data = self.flat_catalog_read_file_data(sfile)
         except (ValueError, RuntimeError) as e:
             print(f"ERROR: {e}")
-            return 1
+            return None, 0, 0, 1
         if len(data) < filesize:
             print(
                 f"WARNING: could only read {len(data)} of the {filesize} bytes of '{lisa_name}'; "
@@ -3031,8 +3069,34 @@ class GetFileMixin(ReplaceFileMixin):
         # ---- ".TEXT" files: convert the on-disk layout back to host text ----
         if lisa_name.upper().endswith(".TEXT"):
             data = lisa_text_file_to_host_text(data)
+        return data, sfile, filesize, 0
 
-        # ---- write the host file (overwrite it if it exists) ----
+    def read_file_as_bytes(self, lisa_name: str) -> Optional[bytes]:
+        """Read the file named lisa_name from this volume and return its
+        complete data as a bytes object.
+
+        Same locate/read/".TEXT" rules as get_file (see
+        _read_named_file_bytes()); the disk image is only read, never
+        written. Returns the file's bytes, or None if the file cannot be
+        read (the reason is printed).
+        """
+        data, _sfile, _filesize, _exit_code = self._read_named_file_bytes(lisa_name)
+        return data
+
+    def get_file(self, lisa_name: str, host_file_path: str) -> int:
+        """Save the file named lisa_name from this volume to the host file
+        host_file_path, overwriting the host file if it exists.
+
+        The file is located and read by _read_named_file_bytes() (the same
+        locate/read/".TEXT" rules as read_file_as_bytes); see that method
+        for details.
+
+        Returns the exit code to use: 0 on success, 3 if no file with that
+        name is on the volume, and 1 on any other failure.
+        """
+        data, sfile, filesize, exit_code = self._read_named_file_bytes(lisa_name)
+        if exit_code != 0 or data is None:
+            return exit_code
         try:
             with open(host_file_path, "wb") as host_file:
                 host_file.write(data)
