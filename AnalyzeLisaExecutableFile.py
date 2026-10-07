@@ -17,6 +17,9 @@ read_file_from_disk_image() calls in analyze() with
 
 Note: Some of this info can be printed by the Workshop utility DUMPOBJ.OBJ.
 
+Note: The full OBJ file binary format is detailed at
+https://bitsavers.org/pdf/apple/lisa/workshop_3.0/Lisa_Develpment_System_Internals_Documentation_198402.pdf
+page 102 .. 141. This utility was written without relying on that information, so it may be wrong. 
 
 Background
 ----------
@@ -42,7 +45,7 @@ INTRINSIC.LIB
   0x22   unit directory, 16-byte records:
              8   unit name, padded with spaces
              2   unit number
-             1   type
+             1   lib_file_id
              1   flag
              4   size / extra
   0x5A2  9c 00             segment-library marker
@@ -50,12 +53,12 @@ INTRINSIC.LIB
              8   segment name, padded with spaces
              2   segment number
              8   descriptor
-             10  extra (byte 1 = type)
-  ...    9e 00             type -> library file-name table:
+             10  extra (byte 1 = lib_file_id)
+  ...    9e 00             lib_file_id -> library file-name table:
              2   value (unused)
              2   entry count
              6 * count:
-                   2   type number
+                   2   lib_file_id
                    4   offset of a Pascal-string file name
 
 Unit table in an .OBJ file
@@ -65,14 +68,14 @@ Unit table in an .OBJ file
   0x20   16-bit entry count
   0x22   16-bit highest unit number
   0x24   entries, 12 bytes each:
-             8   unit name, padded with spaces
-             2   unit number (some compilers set a 0x2000 flag bit)
-             2   flag
+             8   unit name, appears in upper case, e.g. "PASLIB"
+             2   unit number, e.g. 1
+             2   unit_type, e.g. 1 means "Intrinsic"
 
 Segment table in an .OBJ file
   A contiguous run of 18-byte entries:
-             8   segment name, padded with spaces (mixed case)
-             2   segment number (some compilers set a 0x2000 flag bit)
+             8   segment name
+             2   segment number
              8   descriptor
   The run is located by scanning for stretches of valid entries; a stretch
   that contains PASLIB1 (segment 17, present in virtually every program)
@@ -81,9 +84,8 @@ Segment table in an .OBJ file
 
 import struct
 import sys
-from typing import Any
 
-from LisaFileSystemTool import pascal_to_string
+from LisaFileSystemTool import fixed_to_string, pascal_to_string
 from LisaFileSystemToolPerFile import FileSystemWithPerFileCommands
 
 OBJ_UNIT_TABLE_MARKER = b"\x9b\x00"
@@ -99,10 +101,15 @@ NAME_CHARS = set(b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_ ")
 # Segment names may be mixed case.
 SEG_NAME_CHARS = set(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_")
 
+# Meaning of the 2-byte unit_type field in the unit table of an .OBJ file.
+UNIT_TYPE_NAMES = {0: "Regular", 1: "Intrinsic", 2: "Shared"}
 
-def clean_name(raw: bytes) -> str:
-    """Convert a fixed-length, space-padded name field to text."""
-    return raw.split(b"\x00", 1)[0].rstrip(b" ").decode("ascii", "replace")
+
+def unit_type_name(unit_type: int) -> str:
+    """Human-readable name for the unit_type field:
+    0=Regular, 1=Intrinsic, 2=Shared, everything else=Unknown.
+    """
+    return UNIT_TYPE_NAMES.get(unit_type, "Unknown")
 
 
 def strip_volume_prefix(name: str) -> str:
@@ -204,26 +211,30 @@ def _seg_entry_ok(data: bytes, off: int) -> bool:
     return (num & 0x1FFF) <= 255
 
 
-def _read_seg_run(data: bytes, start: int) -> list[tuple[int, str, int, bytes]]:
-    """Read consecutive segment-table entries starting at start."""
+def _read_seg_run(data: bytes, start: int) -> list[tuple[int, str, int, bytes, bytes]]:
+    """Read consecutive segment-table entries starting at start.
+
+    Each entry is (offset, name, segment_number, descriptor, raw), where
+    raw is the entry's complete 18 bytes.
+    """
     entries = []
     off = start
     while _seg_entry_ok(data, off):
-        name = clean_name(data[off : off + 8])
+        name = fixed_to_string(data[off : off + 8])
         num = struct.unpack(">H", data[off + 8 : off + 10])[0]
         desc = data[off + 10 : off + 18]
-        entries.append((off, name, num, desc))
+        entries.append((off, name, num, desc, data[off : off + 18]))
         off += 18
     return entries
 
 
-def find_segment_table(data: bytes) -> tuple[int | None, list[tuple[int, str, int, bytes]]]:
+def find_segment_table(data: bytes) -> tuple[int | None, list[tuple[int, str, int, bytes, bytes]]]:
     """
     Locate the program's segment table in the object file.
 
     The table is a contiguous run of 18-byte entries:
         8 bytes:  segment name, space-padded (mixed case)
-        2 bytes:  segment number (may carry a 0x2000 flag bit)
+        2 bytes:  segment number
         8 bytes:  "descriptor", which the caller may split further into so-called
                   "Version1" and "Version12" fields, as reported by the DUMPOBJ.OBJ Workshop utility.
 
@@ -235,8 +246,9 @@ def find_segment_table(data: bytes) -> tuple[int | None, list[tuple[int, str, in
     the longest run wins.
 
     Returns (start_offset, entries), where entries is a list of one
-    (offset, name, segment_number, descriptor) tuple per entry, with
-    the descriptor being the raw 8 bytes of the entry's last field.
+    (offset, name, segment_number, descriptor, raw) tuple per entry, with
+    the descriptor being the raw 8 bytes of the entry's last field and raw
+    the entry's complete 18 bytes.
     Returns (None, []) if no candidate run is found.
     """
     n = len(data)
@@ -274,7 +286,7 @@ def _seg_lib_entry_ok(data: bytes, off: int) -> bool:
     return (num & 0x1FFF) <= 255
 
 
-def find_seg_lib(data: bytes) -> tuple[int | None, int | None, list[tuple[int, str, int, int, bytes, bytes]]]:
+def find_seg_lib(data: bytes) -> tuple[int | None, int | None, list[tuple[int, str, int, int, bytes, bytes, bytes]]]:
     """
     Locate the segment-library directory (9c 00 marker + 28-byte records).
 
@@ -294,12 +306,12 @@ def find_seg_lib(data: bytes) -> tuple[int | None, int | None, list[tuple[int, s
         entries = []
         off = start
         while _seg_lib_entry_ok(data, off):
-            name = clean_name(data[off : off + 8])
+            name = fixed_to_string(data[off : off + 8])
             num_raw = struct.unpack(">H", data[off + 8 : off + 10])[0]
             num = num_raw & 0x1FFF
             desc = data[off + 10 : off + 18]
             extra = data[off + 18 : off + 28]
-            entries.append((off, name, num_raw, num, desc, extra))
+            entries.append((off, name, num_raw, num, desc, extra, data[off : off + 18]))
             off += 28
         if len(entries) >= 2 and (best is None or len(entries) > len(best[2])):
             best = (m, start, entries)
@@ -308,19 +320,19 @@ def find_seg_lib(data: bytes) -> tuple[int | None, int | None, list[tuple[int, s
     return best
 
 
-def find_type_table(data: bytes) -> dict[int, str]:
+def find_lib_file_id_table(data: bytes) -> dict[int, str]:
     """
-    Locate the 9e 00 type -> library-file-name table.
+    Locate the 9e 00 lib_file_id -> library-file-name table.
 
     Layout:
       2   9e 00 marker
       2   value (unused)
       2   entry count
       count * 6 bytes:
-             2   type number
+             2   lib_file_id
              4   offset of a Pascal string (1-byte length + chars)
 
-    Returns {type: file-name} for the best candidate, or {}.
+    Returns {lib_file_id: file-name} for the best candidate, or {}.
     """
     best = {}
     idx = 0
@@ -342,7 +354,7 @@ def find_type_table(data: bytes) -> dict[int, str]:
             if off + 6 > len(data):
                 ok = False
                 break
-            typ = struct.unpack(">H", data[off : off + 2])[0]
+            lib_file_id = struct.unpack(">H", data[off : off + 2])[0]
             ptr = struct.unpack(">I", data[off + 2 : off + 6])[0]
             if ptr + 1 > len(data):
                 ok = False
@@ -360,21 +372,22 @@ def find_type_table(data: bytes) -> dict[int, str]:
             if not name:
                 ok = False
                 break
-            table[typ] = name
+            table[lib_file_id] = name
         if ok and len(table) > len(best):
             best = table
     return best
 
 
-def scan_obj(file_as_bytes: bytes, file_name: str = "<obj>") -> dict[str, Any]:
-    """Parse the unit table and segment table of a Lisa Pascal object file.
+def scan_units_in_obj(file_as_bytes: bytes, file_name: str = "<obj>") -> list[tuple[int, str, int, int]]:
+    """Parse and print the unit table of a Lisa Pascal object file.
 
     file_as_bytes is the file's complete contents (read from a disk image
-    or from a host file); file_name is only used in the printed header.
+    or from a host file); file_name is only used in the printed messages.
+
+    Returns a list of (offset, name, unit_number, unit_type) tuples, or
+    an empty list if no valid unit table was found.
     """
     data = file_as_bytes
-
-    print(f"\n\n=== EXECUTABLE FILE: {file_name} (of size: {len(data)} bytes) ===")
 
     # ---- unit table -------------------------------------------------
     unit_entries = []
@@ -384,32 +397,43 @@ def scan_obj(file_as_bytes: bytes, file_name: str = "<obj>") -> dict[str, Any]:
     else:
         table_start = marker + 8
         for i in range(count):
-            off = table_start + i * 12
-            raw_name = data[off : off + 8]
-            unit = struct.unpack(">H", data[off + 8 : off + 10])[0]
-            flag = struct.unpack(">H", data[off + 10 : off + 12])[0]
-            # The field holds the unit number the runtime reads. Some
-            # compilers set a 0x2000 flag bit in it (e.g. 0x2001 for unit
-            # 1); the runtime does not mask the bit, so it looks up 8193
-            # instead of 1 and fails with error 143.
-            unit_entries.append((off, clean_name(raw_name), unit, flag))
+            offset = table_start + i * 12
+            raw_name = data[offset : offset + 8]
+            unit_number = struct.unpack(">H", data[offset + 8 : offset + 10])[0]
+            unit_type = struct.unpack(">H", data[offset + 10 : offset + 12])[0]
+            unit_entries.append((offset, fixed_to_string(raw_name), unit_number, unit_type))
 
         print(f"\nUnit table (marker '{OBJ_UNIT_TABLE_MARKER.hex(' ')}' found at 0x{marker:06X}, {len(unit_entries)} entries):")
         print("----------------------------------------------")
-        for off, name, unit, flag in unit_entries:
+        for offset, name, unit_number, unit_type in unit_entries:
             print(
-                f"offset 0x{off:06X}: "
+                f"offset 0x{offset:06X}: "
                 f"{name:<12} "
-                f"unit={unit:3d} "
-                f"flag={flag}"
+                f"unit_number={unit_number:3d} "
+                f"unit_type={unit_type} ({unit_type_name(unit_type)})"
             )
         print(
             "Note: each entry above is 12 bytes long: "
-            "8 bytes for name, 2 bytes for unit number and 2 bytes for flag."
+            "8 bytes for name, 2 bytes for unit number and 2 bytes for unit_type "
+            "(0=Regular, 1=Intrinsic, 2=Shared, everything else=Unknown)."
         )
 
+    return unit_entries
+
+
+def scan_segments_in_obj(file_as_bytes: bytes, file_name: str = "<obj>") -> list[tuple[int, str, int, bytes, bytes]]:
+    """Parse and print the segment table of a Lisa Pascal object file.
+
+    file_as_bytes is the file's complete contents (read from a disk image
+    or from a host file); file_name is only used in the printed messages.
+
+    Returns a list of (offset, name, segment_number, descriptor, raw)
+    tuples, or an empty list if no segment table was found.
+    """
+    data = file_as_bytes
+
     # ---- segment table ---------------------------------------------
-    seg_entries : list[tuple[int, str, int, bytes]] = []
+    seg_entries : list[tuple[int, str, int, bytes, bytes]] = []
     seg_start, segs = find_segment_table(data)
     if seg_start is None:
         print(f"\nNo segment table found in file {file_name}. The file may not be a Lisa executable file.")
@@ -420,11 +444,11 @@ def scan_obj(file_as_bytes: bytes, file_name: str = "<obj>") -> dict[str, Any]:
             f"-- code segments loaded from the shared library:"
         )
         print("--------------------------------------------------------------")
-        for off, name, segment_num, descriptor in seg_entries:
+        for offset, name, segment_num, descriptor, _raw in seg_entries:
             version1 = descriptor[1:4]
             version2 = descriptor[5:]
             print(
-                f"offset 0x{off:06X}: "
+                f"offset 0x{offset:06X}: "
                 f"{name:<12}   "
                 f"segment={segment_num:04X}   "
                 f"Version1={version1.hex().upper()}   Version2={version2.hex().upper()}"
@@ -434,7 +458,7 @@ def scan_obj(file_as_bytes: bytes, file_name: str = "<obj>") -> dict[str, Any]:
             "8 bytes for name, 2 bytes for segment number, 1 byte for ???, 3 bytes for Version1, 1 byte for ???, 3 bytes for Version2."
         )
 
-    return {"units": unit_entries, "segments": seg_entries}
+    return seg_entries
 
 
 def find_lib_directory(data: bytes) -> int:
@@ -459,51 +483,75 @@ def find_lib_directory(data: bytes) -> int:
     return -1
 
 
-def scan_intrinsic_lib(file_as_bytes: bytes, file_name: str = "<lib>") -> dict[str, Any]:
-    """Parse the unit directory and segment directory of an INTRINSIC.LIB.
+def scan_units_in_lib(file_as_bytes: bytes, file_name: str = "<lib>") -> list[tuple[int, str, int, int]]:
+    """Parse and print the unit directory of an INTRINSIC.LIB.
 
     file_as_bytes is the file's complete contents (read from a disk image
-    or from a host file); file_name is only used in the printed header.
+    or from a host file); file_name is only used in the printed messages.
+    Each record is annotated with the library file name looked up in the
+    lib_file_id -> library file-name table of the same file.
+
+    Returns a list of (offset, name, unit_number, lib_file_id) tuples, or
+    an empty list if no unit directory was found.
     """
     data = file_as_bytes
 
-    print(f"\n\n\n=== INTRINSIC LIBRARY: {file_name} (of size: {len(data)} bytes) ===")
-
-    # Parse the type -> library file-name table first, so the unit and
-    # segment dumps below can annotate each record with its library file.
-    type_table = find_type_table(data)
+    # Look up the lib_file_id -> library file-name table, so each record
+    # can be annotated with its library file.
+    lib_file_id_table = find_lib_file_id_table(data)
 
     # ---- unit directory --------------------------------------------
-    unit_entries = []
+    unit_entries : list[tuple[int, str, int, int]] = []
     start = find_lib_directory(data)
     if start < 0:
         print("Unit directory not found.")
     else:
-        off = start
-        while off + 16 <= len(data):
-            raw_name = data[off : off + 8]
-            unit = struct.unpack(">H", data[off + 8 : off + 10])[0]
-            if not is_plausible_name(raw_name) or unit > 255:
+        offset = start
+        while offset + 16 <= len(data):
+            raw_name = data[offset : offset + 8]
+            unit_number = struct.unpack(">H", data[offset + 8 : offset + 10])[0]
+            if not is_plausible_name(raw_name) or unit_number > 255:
                 break
-            typ = data[off + 10]
-            unit_entries.append((off, clean_name(raw_name), unit, typ))
-            off += 16
+            lib_file_id = data[offset + 10]
+            unit_entries.append((offset, fixed_to_string(raw_name), unit_number, lib_file_id))
+            offset += 16
 
         print(
             f"\nUnit directory (starts at 0x{start:06X}, {len(unit_entries)} records):"
         )
         print("--------------------------------------------------------------")
-        for off, name, unit, typ in unit_entries:
-            libname = type_table.get(typ, "Unknown library file")
+        for offset, unit_name, unit_number, lib_file_id in unit_entries:
+            libname = lib_file_id_table.get(lib_file_id, "Unknown library file")
             print(
-                f"offset 0x{off:06X}: {name:<12} unit={unit:<4} "
-                f"type={typ} ({libname})"
+                f"offset 0x{offset:06X}: {unit_name:<12} unit_number={unit_number:<4} "
+                f"lib_file_id={lib_file_id} (file {libname})"
             )
         print(
             "Note: each record above is 16 bytes long: 8 bytes for name, "
-            "2 bytes for unit number, 1 byte for type, 1 byte for flag "
+            "2 bytes for unit number, 1 byte for lib_file_id, 1 byte for flag "
             "and 4 bytes for size/extra."
         )
+
+    return unit_entries
+
+
+def scan_segments_in_lib(file_as_bytes: bytes, file_name: str = "<lib>") -> list[tuple[int, str, int, int, bytes, bytes, int, bytes]]:
+    """Parse and print the segment directory of an INTRINSIC.LIB.
+
+    file_as_bytes is the file's complete contents (read from a disk image
+    or from a host file); file_name is only used in the printed messages.
+    Each record is annotated with the library file name looked up in the
+    lib_file_id -> library file-name table of the same file.
+
+    Returns a list of (offset, name, segment_number_raw, segment_number,
+    descriptor, extra, lib_file_id, raw) tuples, or an empty list if no
+    segment directory was found.
+    """
+    data = file_as_bytes
+
+    # Look up the lib_file_id -> library file-name table, so each record
+    # can be annotated with its library file.
+    lib_file_id_table = find_lib_file_id_table(data)
 
     # ---- segment directory -----------------------------------------
     seg_entries = []
@@ -511,46 +559,63 @@ def scan_intrinsic_lib(file_as_bytes: bytes, file_name: str = "<lib>") -> dict[s
     if seg_marker is None:
         print("\nSegment directory not found (9c 00 marker).")
     else:
-        for off, name, segment_num_raw, segment_num, descriptor, extra in segs:
-            typ = extra[1] if len(extra) >= 2 else 0
-            seg_entries.append((off, name, segment_num_raw, segment_num, descriptor, extra, typ))
+        for offset, unit_name, segment_num_raw, segment_num, descriptor, extra, raw18 in segs:
+            lib_file_id = extra[1] if len(extra) >= 2 else 0
+            seg_entries.append((offset, unit_name, segment_num_raw, segment_num, descriptor, extra, lib_file_id, raw18))
         print(
             f"\nSegment directory (marker '{SEG_LIB_MARKER.hex(' ')}' found at 0x{seg_marker:06X}, "
             f"dir at 0x{seg_dir:06X}, {len(seg_entries)} records):"
         )
         print("--------------------------------------------------------------")
-        for off, name, segment_num_raw, segment_num, descriptor, extra, typ1 in seg_entries:
+        for offset, unit_name, segment_num_raw, segment_num, descriptor, extra, lib_file_id, raw18 in seg_entries:
             version1 = descriptor[1:4]
             version2 = descriptor[5:]
-            libname = type_table.get(typ, "Unknown library file")
+            libname = lib_file_id_table.get(lib_file_id, "Unknown library file")
             print(
-                f"offset 0x{off:06X}: "
-                f"{name:<12} "
+                f"offset 0x{offset:06X}: "
+                f"{unit_name:<12} "
                 f"segment={segment_num:04X}   "
-                f"type={typ:<3} "
-                f"({libname:<14})   "
+                f"lib_file_id={lib_file_id:<3} "
+                f"(file {libname:<14})   "
                 f"   Version1={version1.hex().upper()}   Version2={version2.hex().upper()}"
             )
         print(
             "Note: each record above is 28 bytes long: 8 bytes for name, "
             "2 bytes for segment number, 1 byte for ???, 3 bytes for Version1, 1 byte for ???, 3 bytes for Version2, "
-            "10 bytes for extra - the type byte is the 2nd byte of "
+            "10 bytes for extra - the lib_file_id byte is the 2nd byte of "
             "that extra field (record offset 19)."
         )
 
-    # ---- type -> library file name table ---------------------------
-    if type_table:
-        print(f"\nType -> library file table ({len(type_table)} entries):")
+    return seg_entries
+
+
+def scan_lib_file_id_table_in_lib(file_as_bytes: bytes, file_name: str = "<lib>") -> dict[int, str]:
+    """Parse and print the lib_file_id -> library file-name table
+    (9e 00 marker) of an INTRINSIC.LIB.
+
+    file_as_bytes is the file's complete contents (read from a disk image
+    or from a host file); file_name is only used in the printed messages.
+
+    Returns the {lib_file_id: library file name} dictionary, or {} if no
+    valid table was found.
+    """
+    data = file_as_bytes
+    lib_file_id_table = find_lib_file_id_table(data)
+
+    # ---- lib_file_id -> library file name table --------------------
+    if lib_file_id_table:
+        print(f"\nlib_file_id -> library file-name table ({len(lib_file_id_table)} entries):")
         print("--------------------------------------------------------------")
-        for typ in sorted(type_table):
-            print(f"  type {typ:<3} -> {type_table[typ]}")
+        for lib_file_id in sorted(lib_file_id_table):
+            print(f"  lib_file_id {lib_file_id:<3} -> {lib_file_id_table[lib_file_id]}")
         print(
-            "Note: each entry above is 6 bytes long: 2 bytes for the type "
-            "number and 4 bytes for an offset pointing at a Pascal string "
-            "(1-byte length + characters) holding the library file name."
+            "Note: each entry above is 6 bytes long: 2 bytes for the "
+            "lib_file_id and 4 bytes for an offset pointing at a Pascal "
+            "string (1-byte length + characters) holding the library "
+            "file name."
         )
 
-    return {"units": unit_entries, "segments": seg_entries, "type_table": type_table}
+    return lib_file_id_table
 
 
 class LisaExecutableFileAnalyzer(FileSystemWithPerFileCommands):
@@ -602,48 +667,92 @@ class LisaExecutableFileAnalyzer(FileSystemWithPerFileCommands):
         located = self._locate_named_file(obj_file_name)
         actual_obj_name = located.name if located.name is not None else obj_file_name
 
-        obj = scan_obj(obj_file_as_bytes, obj_file_name)
-        lib = scan_intrinsic_lib(lib_file_as_bytes, INTRINSIC_LIB_NAME)
+        print(f"\n\n=== EXECUTABLE FILE: {obj_file_name} (of size: {len(obj_file_as_bytes)} bytes) ===")
+        obj_units : list[tuple[int, str, int, int]] = scan_units_in_obj(obj_file_as_bytes, obj_file_name)
+        obj_segments : list[tuple[int, str, int, str, bytes]] = scan_segments_in_obj(obj_file_as_bytes, obj_file_name)
 
-        # Build dictionaries.  The same name can occur more than once in a
-        # table, so keep the first number we see.
-        requested_units = {}
-        for off, name, unit, flag in obj["units"]:
-            if name in requested_units and requested_units[name] != unit:
-                print(f"\nWARNING: {name} appears in OBJ with two unit numbers.")
-            requested_units.setdefault(name, unit)
+        print(f"\n\n\n=== INTRINSIC LIBRARY: {INTRINSIC_LIB_NAME} (of size: {len(lib_file_as_bytes)} bytes) ===")
+        all_intrinsic_units : list[tuple[int, str, int, int]] = scan_units_in_lib(lib_file_as_bytes, INTRINSIC_LIB_NAME)
+        all_intrinsic_segments : list[tuple[int, str, int, str, bytes]] = scan_segments_in_lib(lib_file_as_bytes, INTRINSIC_LIB_NAME)
+        intrinsic_file_id_table : list[tuple[int, int]] = scan_lib_file_id_table_in_lib(lib_file_as_bytes, INTRINSIC_LIB_NAME)
 
-        available_units = {}
-        available_unit_types = {}
-        for off, name, unit, typ in lib["units"]:
-            if name in available_units and available_units[name] != unit:
-                print(f"\nWARNING: {name} appears in LIB with two unit numbers.")
-            available_units.setdefault(name, unit)
-            available_unit_types.setdefault(name, typ)
+        # The same name can occur more than once in a table, so keep the
+        # first entry we see: rebuild obj_units without later duplicates,
+        # warning if a duplicate carries a different unit number.
+        deduped = []
+        for entry in obj_units:
+            unit_name, unit_number = entry[1], entry[2]
+            same_name = [e for e in deduped if e[1] == unit_name]
+            if same_name:
+                if any(e[2] != unit_number for e in same_name):
+                    print(f"\nWARNING: {unit_name} appears in OBJ with two unit numbers.")
+            else:
+                deduped.append(entry)
+        obj_units = deduped
 
-        requested_segs = {}
-        for off, name, num, desc in obj["segments"]:
-            if name in requested_segs and requested_segs[name] != num:
-                print(f"\nWARNING: segment {name} appears in OBJ with two numbers.")
-            requested_segs.setdefault(name, num)
+        # The same name can occur more than once in a table, so keep the
+        # first entry we see: rebuild lib_units without later duplicates,
+        # warning if a duplicate carries a different unit number.
+        deduped = []
+        for entry in all_intrinsic_units:
+            unit_name, unit_number = entry[1], entry[2]
+            same_name = [e for e in deduped if e[1] == unit_name]
+            if same_name:
+                if any(e[2] != unit_number for e in same_name):
+                    print(f"\nWARNING: {unit_name} appears in LIB with two unit numbers.")
+            else:
+                deduped.append(entry)
+        all_intrinsic_units = deduped
 
-        available_segs = {}
-        available_seg_types = {}
-        for off, name, num_raw, num, desc, extra, typ in lib["segments"]:
-            if name in available_segs and available_segs[name] != num:
-                print(f"\nWARNING: segment {name} appears in LIB with two numbers.")
-            available_segs.setdefault(name, num)
-            available_seg_types.setdefault(name, typ)
+        # The same name can occur more than once in a table, so keep the
+        # first entry we see: rebuild obj_segments without later duplicates,
+        # warning if a duplicate carries a different segment number.
+        deduped = []
+        for entry in obj_segments:
+            seg_name, seg_num = entry[1], entry[2]
+            same_name = [e for e in deduped if e[1] == seg_name]
+            if same_name:
+                if any(e[2] != seg_num for e in same_name):
+                    print(f"\nWARNING: segment {seg_name} appears in OBJ with two numbers.")
+            else:
+                deduped.append(entry)
+        obj_segments = deduped
 
-        type_table = lib.get("type_table", {})
+        # The same name can occur more than once in a table, so keep the
+        # first entry we see: rebuild lib_segments without later duplicates,
+        # warning if a duplicate carries a different segment number.
+        deduped = []
+        for entry in all_intrinsic_segments:
+            seg_name, seg_num = entry[1], entry[3]
+            same_name = [e for e in deduped if e[1] == seg_name]
+            if same_name:
+                if any(e[3] != seg_num for e in same_name):
+                    print(f"\nWARNING: segment {seg_name} appears in LIB with two numbers.")
+            else:
+                deduped.append(entry)
+        all_intrinsic_segments = deduped
 
-        def type_note(typ: int) -> str:
-            """'type=N (LIBFILE, file exists)' for the type byte typ, using
-            the type -> library file-name table of INTRINSIC.LIB and a
-            read-only check that the library file is on the volume."""
-            libname = type_table.get(typ)
+        # Every problem the comparison detects is collected in this list;
+        # the summary line printed at the end of analyze() is based on it.
+        problems: list[str] = []
+
+        def lib_file_id_note(lib_file_id: int) -> str:
+            """Return a short note about the library file selected by the
+            lib_file_id, using the lib_file_id -> library file-name table
+            of INTRINSIC.LIB and a read-only check that the library file
+            is on the volume.  Possible results:
+              'lib_file_id=NN (no library file name in INTRINSIC.LIB)'
+              'lib_file_id=NN (file <name padded to 14 chars>, OK: file exists)'
+              'lib_file_id=NN (file <name>, !!!!! FILE NOT FOUND ON VOLUME !!!!!)'
+            A missing (or unresolvable) library file is also recorded in
+            the problems list.
+            """
+            libname = intrinsic_file_id_table.get(lib_file_id)
             if libname is None:
-                return f"type={typ:02d} (no library file name in INTRINSIC.LIB)"
+                problem = f"lib_file_id {lib_file_id:02d} has no library file name in INTRINSIC.LIB"
+                if problem not in problems:
+                    problems.append(problem)
+                return f"lib_file_id={lib_file_id:02d} (no library file name in INTRINSIC.LIB)"
             # The table may carry a leading '*' or tab marker; the file on
             # the volume can be named with or without it, so try both.
             candidates = [libname]
@@ -651,99 +760,125 @@ class LisaExecutableFileAnalyzer(FileSystemWithPerFileCommands):
             if stripped and stripped != libname:
                 candidates.append(stripped)
             if any(self.file_exists_on_volume(n) for n in candidates):
-                return f"type={typ:02d} (in {libname:<14}, OK: file exists)"
-            return f"type={typ:02d} ({libname}, !!!!! FILE NOT FOUND ON VOLUME !!!!!)"
+                return f"lib_file_id={lib_file_id:02d} (file {libname:<14}, OK: file exists)"
+            problem = f"intrinsic library file '{libname}' (lib_file_id {lib_file_id:02d}) not found on volume"
+            if problem not in problems:
+                problems.append(problem)
+            return f"lib_file_id={lib_file_id:02d} (file {libname}, !!!!! FILE NOT FOUND ON VOLUME !!!!!)"
 
         print("\n\n\n=== COMPARISON ===")
 
-        if not requested_units:
+        if not obj_units:
             print(f"\nNo unit references were detected in file {actual_obj_name}. The file may not be a Lisa executable file.")
+            problems.append(f"no unit references detected in file {actual_obj_name} (the file may not be a Lisa executable file)")
         else:
             print(f"\nUnits referenced by executable file '{actual_obj_name}':")
             print("-------------------------")
-            for name, obj_unit in sorted(requested_units.items()):
-                if name in available_units:
-                    lib_unit = available_units[name]
-                    lib_type = available_unit_types[name]
-                    status = "OK(Unit numbers match)" if obj_unit == lib_unit else "!!!!! UNIT NUMBERS MISMATCH !!!!!!"
+            for offset, unit_name_in_obj, unit_num_in_obj, unit_type in sorted(obj_units, key=lambda e: e[1]):
+                matching = [e for e in all_intrinsic_units if e[1] == unit_name_in_obj]
+                if matching:
+                    unit_num_in_intrinsic_lib = matching[0][2]
+                    intrinsic_lib_file_id = matching[0][3]
+                    if unit_num_in_obj == unit_num_in_intrinsic_lib:
+                        status = "OK(Unit numbers match)"
+                    else:
+                        status = "!!!!! UNIT NUMBERS MISMATCH !!!!!!"
+                        problems.append(f"unit {unit_name_in_obj}: unit number mismatch (OBJ={unit_num_in_obj}, LIB={unit_num_in_intrinsic_lib})")
                     print(
-                        f"{name:<12} Unit-in-OBJ={obj_unit:<4} Unit-in-LIB={lib_unit:<4} "
-                        f"{status} {type_note(lib_type)}"
+                        f"{unit_name_in_obj:<12} Unit-in-OBJ={unit_num_in_obj:<4} Unit-in-LIB={unit_num_in_intrinsic_lib:<4} "
+                        f"{status} {lib_file_id_note(intrinsic_lib_file_id)}"
                     )
                 else:
-                    print(f"{name:<12} Unit-in-OBJ={obj_unit:<4}   Unit-in-LIB=---- MISSING")
-                    print(f"{name:<12} Unit-in-OBJ={obj_unit:<4}   Unit-in-LIB=---- MISSING")
-                    print(f"{name:<12} Unit-in-OBJ={obj_unit:<4}   UnitInLILIB=---- MISSING")
+                    print(f"{unit_name_in_obj:<12} Unit-in-OBJ={unit_num_in_obj:<4}   Unit-in-LIB=---- MISSING")
+                    problems.append(f"unit {unit_name_in_obj} (unit number {unit_num_in_obj}) not found in INTRINSIC.LIB")
 
             print(f"\nSegments needed by executable file '{actual_obj_name}':")
             print("--------------------------------------------------------------")
-            if not requested_segs:
+            if not obj_segments:
                 print("(none found)")
-            for name, seg_num_in_obj in sorted(requested_segs.items()):
-                seg_bit = bool(seg_num_in_obj & 0x2000)
-                if name in available_segs:
-                    seg_num_in_lib = available_segs[name]
-                    lib_type = available_seg_types[name]
-                    status = "OK(Segment numbers match)" if seg_num_in_obj == seg_num_in_lib else "!!!!! SEGMENT NUMBERS MISMATCH !!!!!"
+                problems.append(f"no segment table found in file {actual_obj_name} (the file may not be a Lisa executable file)")
+            for offset, seg_name_in_obj, seg_num_in_obj, desc, obj_raw in sorted(obj_segments, key=lambda e: e[1]):
+                matching = [e for e in all_intrinsic_segments if e[1] == seg_name_in_obj]
+                if matching:
+                    seg_num_in_lib = matching[0][3]
+                    intrinsic_lib_file_id = matching[0][6]
+                    lib_raw = matching[0][7]
+                    # Compare the whole 18-byte segment entry, which includes the segment name, number, Version1, Version2, and other metadata.
+                    if obj_raw == lib_raw:
+                        status = "OK(18 bytes match)"
+                    else:
+                        status = "!!!!! 18-BYTE SEGMENT ENTRIES MISMATCH !!!!!"
+                        problems.append(f"segment {seg_name_in_obj}: 18-byte segment entries differ between OBJ and LIB")
                     print(
-                        f"{name:<12} Segment-in-OBJ={seg_num_in_obj:04X}   Segment-in-LIB={seg_num_in_lib:04X}   "
-                        f"{status} {type_note(lib_type)}"
+                        f"{seg_name_in_obj:<12}   "
+                        f"{status} {lib_file_id_note(intrinsic_lib_file_id)}"
                     )
+                    if obj_raw != lib_raw:
+                        print(f"{'':<12} OBJ 18 bytes: {obj_raw.hex(' ')}")
+                        print(f"{'':<12} LIB 18 bytes: {lib_raw.hex(' ')}")
                 else:
                     print(
-                        f"{name:<12} Segment-in-OBJ={seg_num_in_obj:04X}   "
-                        f"Segment-in-LIB=---- (not in INTRINSIC.LIB; user segment or other library)  "
-                    )   
+                        f"{seg_name_in_obj:<12} Segment-in-OBJ={seg_num_in_obj:04X}   "
+                        f"Segment-in-LIB=---- (not found in INTRINSIC.LIB!)  "
+                    )
+                    problems.append(f"segment {seg_name_in_obj} (segment number {seg_num_in_obj:04X}) not found in INTRINSIC.LIB")
 
-        # ---- group units and segments by library (type byte) -----------
-        # type_table = lib.get("type_table", {})
-        # if lib["units"] or lib["segments"]:
+        # ---- group units and segments by library (lib_file_id byte) ----
+        # if lib_units or lib_segments:
         #     print("\n=== UNITS AND SEGMENTS GROUPED BY LIBRARY ===")
         #     print("Both the unit directory and the segment directory carry a")
-        #     print("'type' byte; it selects the shared library file that holds")
-        #     print("the code.  A segment is the code of the unit(s) in its")
-        #     print("library, so units and segments are linked by type rather")
-        #     print("than by a one-to-one name or number.")
+        #     print("'lib_file_id' byte; it selects the shared library file")
+        #     print("that holds the code.  A segment is the code of the unit(s)")
+        #     print("in its library, so units and segments are linked by")
+        #     print("lib_file_id rather than by a one-to-one name or number.")
         #     print()
 
-        #     unit_types = {}
-        #     for off, name, unit, typ in lib["units"]:
-        #         unit_types.setdefault(typ, []).append((name, unit))
-        #     seg_types = {}
-        #     for off, name, num_raw, num, desc, extra, typ in lib["segments"]:
-        #         seg_types.setdefault(typ, []).append((name, num))
+        #     unit_lib_file_ids = {}
+        #     for off, name, unit, lib_file_id in lib_units:
+        #         unit_lib_file_ids.setdefault(lib_file_id, []).append((name, unit))
+        #     seg_lib_file_ids = {}
+        #     for off, name, num_raw, num, desc, extra, lib_file_id in lib_segments:
+        #         seg_lib_file_ids.setdefault(lib_file_id, []).append((name, num))
 
         #     req_units = set(requested_units)
         #     req_segs = set(requested_segs)
 
-        #     for typ in sorted(set(unit_types) | set(seg_types)):
-        #         libname = type_table.get(typ, "?")
-        #         us = unit_types.get(typ, [])
-        #         ss = seg_types.get(typ, [])
+        #     for lib_file_id in sorted(set(unit_lib_file_ids) | set(seg_lib_file_ids)):
+        #         libname = lib_file_id_table.get(lib_file_id, "?")
+        #         us = unit_lib_file_ids.get(lib_file_id, [])
+        #         ss = seg_lib_file_ids.get(lib_file_id, [])
         #         ustr = "  ".join(
         #             f"{n}({u})" + ("*" if n in req_units else "") for n, u in us
         #         )
         #         sstr = "  ".join(
         #             f"{n}({s})" + ("*" if n in req_segs else "") for n, s in ss
         #         )
-        #         print(f"type {typ:<3} -> {libname}")
+        #         print(f"lib_file_id {lib_file_id:<3} -> {libname}")
         #         print(f"   units   ({len(us):<2}): {ustr}")
         #         print(f"   segments({len(ss):<2}): {sstr}")
         #         print()
         #     print("(* = referenced by the OBJ file)")
         #     print()
 
-        # Detect duplicate unit numbers in the library.
+        # Detect duplicate unit numbers in INTRINSIC.LIB.
         by_unit = {}
-        for name, unit in available_units.items():
-            by_unit.setdefault(unit, []).append(name)
+        for offset, unit_name, unit_number, intrinsic_lib_file_id in all_intrinsic_units:
+            by_unit.setdefault(unit_number, []).append(unit_name)
 
         duplicates = {u: n for u, n in by_unit.items() if len(n) > 1}
         if duplicates:
-            print("\nWARNING: duplicate unit numbers in library:")
+            print("\nWARNING: duplicate unit numbers found in INTRINSIC.LIB:")
             print("----------------------------------------------")
-            for unit, names in sorted(duplicates.items()):
-                print(f"unit {unit}: " + ", ".join(names))
+            for unit_number, names in sorted(duplicates.items()):
+                print(f"unit {unit_number}: " + ", ".join(names))
+
+        # ---- summary ---------------------------------------------------
+        if problems:
+            print("\n!!!!! PROBLEMS FOUND !!!!! :")
+            for problem in problems:
+                print(f"  - {problem}")
+        else:
+            print(f"\nEverything matches and all intrinsic library files needed to execute file '{obj_file_name}' are present on the disk image.")
 
         print("\nDone.")
 
