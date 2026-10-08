@@ -3291,6 +3291,24 @@ def pascal_to_string(pascal_string: bytes, encoding="mac-roman", start: int = 0)
     return dest.decode(encoding) if actual_length > 0 else ""
 
 
+def fixed_len_bytes_to_string(fixed_field: bytes, encoding="ascii") -> str:
+    """Converts a fixed-length, space-padded name field to a Python string.
+
+    Unlike pascal_to_string(), the field carries no length byte: it is a
+    fixed number of bytes holding the name, padded with spaces (and
+    optionally terminated by NUL bytes), as used for unit and segment
+    names in Lisa Pascal object files and in INTRINSIC.LIB.
+
+    Args:
+        fixed_field (bytes): The fixed-length name field.
+        encoding (str): The encoding to use for decoding (default is 'ascii').
+
+    Returns:
+        str: The name without its padding (stops at the first NUL byte).
+    """
+    return fixed_field.split(b"\x00", 1)[0].rstrip(b" ").decode(encoding, "replace")
+
+
 def format_table(
     headers: list[str], rows: list[list[str]], max_width: int = 80, flex_col: int = 1
 ) -> list[str]:

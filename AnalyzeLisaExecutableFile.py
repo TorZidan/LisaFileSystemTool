@@ -85,7 +85,7 @@ Segment table in an .OBJ file
 import struct
 import sys
 
-from LisaFileSystemTool import fixed_to_string, pascal_to_string
+from LisaFileSystemTool import fixed_len_bytes_to_string, pascal_to_string
 from LisaFileSystemToolPerFile import FileSystemWithPerFileCommands
 
 OBJ_UNIT_TABLE_MARKER = b"\x9b\x00"
@@ -220,7 +220,7 @@ def _read_seg_run(data: bytes, start: int) -> list[tuple[int, str, int, bytes, b
     entries = []
     off = start
     while _seg_entry_ok(data, off):
-        name = fixed_to_string(data[off : off + 8])
+        name = fixed_len_bytes_to_string(data[off : off + 8])
         num = struct.unpack(">H", data[off + 8 : off + 10])[0]
         desc = data[off + 10 : off + 18]
         entries.append((off, name, num, desc, data[off : off + 18]))
@@ -306,7 +306,7 @@ def find_seg_lib(data: bytes) -> tuple[int | None, int | None, list[tuple[int, s
         entries = []
         off = start
         while _seg_lib_entry_ok(data, off):
-            name = fixed_to_string(data[off : off + 8])
+            name = fixed_len_bytes_to_string(data[off : off + 8])
             num_raw = struct.unpack(">H", data[off + 8 : off + 10])[0]
             num = num_raw & 0x1FFF
             desc = data[off + 10 : off + 18]
@@ -401,7 +401,7 @@ def scan_units_in_obj(file_as_bytes: bytes, file_name: str = "<obj>") -> list[tu
             raw_name = data[offset : offset + 8]
             unit_number = struct.unpack(">H", data[offset + 8 : offset + 10])[0]
             unit_type = struct.unpack(">H", data[offset + 10 : offset + 12])[0]
-            unit_entries.append((offset, fixed_to_string(raw_name), unit_number, unit_type))
+            unit_entries.append((offset, fixed_len_bytes_to_string(raw_name), unit_number, unit_type))
 
         print(f"\nUnit table (marker '{OBJ_UNIT_TABLE_MARKER.hex(' ')}' found at 0x{marker:06X}, {len(unit_entries)} entries):")
         print("----------------------------------------------")
@@ -513,7 +513,7 @@ def scan_units_in_lib(file_as_bytes: bytes, file_name: str = "<lib>") -> list[tu
             if not is_plausible_name(raw_name) or unit_number > 255:
                 break
             lib_file_id = data[offset + 10]
-            unit_entries.append((offset, fixed_to_string(raw_name), unit_number, lib_file_id))
+            unit_entries.append((offset, fixed_len_bytes_to_string(raw_name), unit_number, lib_file_id))
             offset += 16
 
         print(
