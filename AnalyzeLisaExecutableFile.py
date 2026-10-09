@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Prints the shared (also known as 'intrinsic') libraries used by a Lisa executable file (present on the given disk image).
+Prints the shared/intrinsic library units, segments and filenames used by a Lisa executable file (present on the given disk image), e.g. EDITOR.OBJ .
 
 Usage: 
-    python3 AnalyzeLisaExecutableFile.py <disk image file name> <name of executable .OBJ file>
+    python3 AnalyzeLisaExecutableFile.py <disk image file name> <name of executable file>
 
 It reads the specified executable file (e.g. EDITOR.OBJ) and the INTRINSIC.LIB
 file from the specified  Lisa disk image file.
@@ -52,7 +52,7 @@ INTRINSIC.LIB
   0x5A8  segment directory, 28-byte records:
              8   segment name, padded with spaces
              2   segment number
-             8   descriptor
+             8   descriptor (1 byte for ???, 3 bytes for Version1, 1 byte for ???, 3 bytes for Version2)
              10  extra (byte 1 = lib_file_id)
   ...    9e 00             lib_file_id -> library file-name table:
              2   value (unused)
@@ -76,7 +76,7 @@ Segment table in an .OBJ file
   A contiguous run of 18-byte entries:
              8   segment name
              2   segment number
-             8   descriptor
+             8   descriptor (1 byte for ???, 3 bytes for Version1, 1 byte for ???, 3 bytes for Version2)
   The run is located by scanning for stretches of valid entries; a stretch
   that contains PASLIB1 (segment 17, present in virtually every program)
   is preferred, then the longest.
@@ -94,11 +94,11 @@ SEG_LIB_MARKER = b"\x9c\x00"
 # The name of the intrinsic library file on the volume (hard-coded).
 INTRINSIC_LIB_NAME = "INTRINSIC.LIB"
 
-# Unit names are short uppercase identifiers in a fixed-length,
+# Unit names (e.g. "PASLIB") are short uppercase identifiers in a fixed-length,
 # space-padded field.
 NAME_CHARS = set(b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_ ")
 
-# Segment names may be mixed case.
+# Segment names (e.g. "PASLIB1", "FmgrUtil") may be mixed case.
 SEG_NAME_CHARS = set(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_")
 
 # Meaning of the 2-byte unit_type field in the unit table of an .OBJ file.
@@ -230,7 +230,7 @@ def _read_seg_run(data: bytes, start: int) -> list[tuple[int, str, int, bytes, b
 
 def find_segment_table(data: bytes) -> tuple[int | None, list[tuple[int, str, int, bytes, bytes]]]:
     """
-    Locate the program's segment table in the object file.
+    Locate the program's segment table in the executable file.
 
     The table is a contiguous run of 18-byte entries:
         8 bytes:  segment name, space-padded (mixed case)
@@ -378,8 +378,8 @@ def find_lib_file_id_table(data: bytes) -> dict[int, str]:
     return best
 
 
-def scan_units_in_obj(file_as_bytes: bytes, file_name: str = "<obj>") -> list[tuple[int, str, int, int]]:
-    """Parse and print the unit table of a Lisa Pascal object file.
+def scan_units_in_exec_file(file_as_bytes: bytes, file_name: str) -> list[tuple[int, str, int, int]]:
+    """Parse and print the unit table of a Lisa Pascal executable file.
 
     file_as_bytes is the file's complete contents (read from a disk image
     or from a host file); file_name is only used in the printed messages.
@@ -421,8 +421,8 @@ def scan_units_in_obj(file_as_bytes: bytes, file_name: str = "<obj>") -> list[tu
     return unit_entries
 
 
-def scan_segments_in_obj(file_as_bytes: bytes, file_name: str = "<obj>") -> list[tuple[int, str, int, bytes, bytes]]:
-    """Parse and print the segment table of a Lisa Pascal object file.
+def scan_segments_in_exec_file(file_as_bytes: bytes, file_name: str) -> list[tuple[int, str, int, bytes, bytes]]:
+    """Parse and print the segment table of a Lisa Pascal executable file.
 
     file_as_bytes is the file's complete contents (read from a disk image
     or from a host file); file_name is only used in the printed messages.
@@ -527,7 +527,7 @@ def scan_units_in_lib(file_as_bytes: bytes, file_name: str = "<lib>") -> list[tu
                 f"lib_file_id={lib_file_id} (file {libname})"
             )
         print(
-            "Note: each record above is 16 bytes long: 8 bytes for name, "
+            "Note: each entry above is 16 bytes long: 8 bytes for name, "
             "2 bytes for unit number, 1 byte for lib_file_id, 1 byte for flag "
             "and 4 bytes for size/extra."
         )
@@ -580,7 +580,7 @@ def scan_segments_in_lib(file_as_bytes: bytes, file_name: str = "<lib>") -> list
                 f"   Version1={version1.hex().upper()}   Version2={version2.hex().upper()}"
             )
         print(
-            "Note: each record above is 28 bytes long: 8 bytes for name, "
+            "Note: each entry above is 28 bytes long: 8 bytes for name, "
             "2 bytes for segment number, 1 byte for ???, 3 bytes for Version1, 1 byte for ???, 3 bytes for Version2, "
             "10 bytes for extra - the lib_file_id byte is the 2nd byte of "
             "that extra field (record offset 19)."
@@ -651,25 +651,25 @@ class LisaExecutableFileAnalyzer(FileSystemWithPerFileCommands):
         located = self._locate_named_file(lisa_name)
         return located.status == "file"
 
-    def analyze(self, obj_file_name: str) -> None:
-        """Read the .OBJ file named obj_file_name and the hard-coded
+    def analyze(self, executable_file_name: str) -> None:
+        """Read the executable file named executable_file_name and the hard-coded
         INTRINSIC.LIB (INTRINSIC_LIB_NAME) from this disk image, parse
         both, and print a comparison of the units and code segments the
         object file references with the entries of the intrinsic library.
         """
-        obj_file_as_bytes = self.read_file_from_disk_image(obj_file_name)
+        exec_file_as_bytes = self.read_file_from_disk_image(executable_file_name)
         lib_file_as_bytes = self.read_file_from_disk_image(INTRINSIC_LIB_NAME)
 
-        # The name lookup is case-insensitive, so obj_file_name may differ
-        # in case from the name stored on the volume; located.name is the
+        # The name lookup is case-insensitive, so executable_file_name may differ
+        # in case from the actual file name stored on the volume; located.name is the
         # file's actual name (None if the file is not on the volume, e.g.
         # when the reads above were replaced by host-file reads).
-        located = self._locate_named_file(obj_file_name)
-        actual_obj_name = located.name if located.name is not None else obj_file_name
+        located_file = self._locate_named_file(executable_file_name)
+        found_exec_file_name = located_file.name if located_file.name is not None else executable_file_name
 
-        print(f"\n\n=== EXECUTABLE FILE: {obj_file_name} (of size: {len(obj_file_as_bytes)} bytes) ===")
-        obj_units : list[tuple[int, str, int, int]] = scan_units_in_obj(obj_file_as_bytes, obj_file_name)
-        obj_segments : list[tuple[int, str, int, str, bytes]] = scan_segments_in_obj(obj_file_as_bytes, obj_file_name)
+        print(f"\n\n=== EXECUTABLE FILE: {executable_file_name} (of size: {len(exec_file_as_bytes)} bytes) ===")
+        exec_file_units : list[tuple[int, str, int, int]] = scan_units_in_exec_file(exec_file_as_bytes, executable_file_name)
+        exec_file_segments : list[tuple[int, str, int, str, bytes]] = scan_segments_in_exec_file(exec_file_as_bytes, executable_file_name)
 
         print(f"\n\n\n=== INTRINSIC LIBRARY: {INTRINSIC_LIB_NAME} (of size: {len(lib_file_as_bytes)} bytes) ===")
         all_intrinsic_units : list[tuple[int, str, int, int]] = scan_units_in_lib(lib_file_as_bytes, INTRINSIC_LIB_NAME)
@@ -680,15 +680,15 @@ class LisaExecutableFileAnalyzer(FileSystemWithPerFileCommands):
         # first entry we see: rebuild obj_units without later duplicates,
         # warning if a duplicate carries a different unit number.
         deduped = []
-        for entry in obj_units:
+        for entry in exec_file_units:
             unit_name, unit_number = entry[1], entry[2]
             same_name = [e for e in deduped if e[1] == unit_name]
             if same_name:
                 if any(e[2] != unit_number for e in same_name):
-                    print(f"\nWARNING: {unit_name} appears in OBJ with two unit numbers.")
+                    print(f"\nWARNING: {unit_name} appears in EXEC with two unit numbers.")
             else:
                 deduped.append(entry)
-        obj_units = deduped
+        exec_file_units = deduped
 
         # The same name can occur more than once in a table, so keep the
         # first entry we see: rebuild lib_units without later duplicates,
@@ -705,18 +705,18 @@ class LisaExecutableFileAnalyzer(FileSystemWithPerFileCommands):
         all_intrinsic_units = deduped
 
         # The same name can occur more than once in a table, so keep the
-        # first entry we see: rebuild obj_segments without later duplicates,
+        # first entry we see: rebuild exec_file_segments without later duplicates,
         # warning if a duplicate carries a different segment number.
         deduped = []
-        for entry in obj_segments:
+        for entry in exec_file_segments:
             seg_name, seg_num = entry[1], entry[2]
             same_name = [e for e in deduped if e[1] == seg_name]
             if same_name:
                 if any(e[2] != seg_num for e in same_name):
-                    print(f"\nWARNING: segment {seg_name} appears in OBJ with two numbers.")
+                    print(f"\nWARNING: segment {seg_name} appears in EXEC with two numbers.")
             else:
                 deduped.append(entry)
-        obj_segments = deduped
+        exec_file_segments = deduped
 
         # The same name can occur more than once in a table, so keep the
         # first entry we see: rebuild lib_segments without later duplicates,
@@ -768,97 +768,60 @@ class LisaExecutableFileAnalyzer(FileSystemWithPerFileCommands):
 
         print("\n\n\n=== COMPARISON ===")
 
-        if not obj_units:
-            print(f"\nNo unit references were detected in file {actual_obj_name}. The file may not be a Lisa executable file.")
-            problems.append(f"no unit references detected in file {actual_obj_name} (the file may not be a Lisa executable file)")
+        if not exec_file_units:
+            print(f"\nNo unit references were detected in file {found_exec_file_name}. The file may not be a Lisa executable file.")
+            problems.append(f"no unit references detected in file {found_exec_file_name} (the file may not be a Lisa executable file)")
         else:
-            print(f"\nUnits referenced by executable file '{actual_obj_name}':")
+            print(f"\nUnits referenced by executable file '{found_exec_file_name}':")
             print("-------------------------")
-            for offset, unit_name_in_obj, unit_num_in_obj, unit_type in sorted(obj_units, key=lambda e: e[1]):
-                matching = [e for e in all_intrinsic_units if e[1] == unit_name_in_obj]
+            for offset, unit_name_in_exec, unit_num_in_exec, unit_type in sorted(exec_file_units, key=lambda e: e[1]):
+                matching = [e for e in all_intrinsic_units if e[1] == unit_name_in_exec]
                 if matching:
                     unit_num_in_intrinsic_lib = matching[0][2]
                     intrinsic_lib_file_id = matching[0][3]
-                    if unit_num_in_obj == unit_num_in_intrinsic_lib:
+                    if unit_num_in_exec == unit_num_in_intrinsic_lib:
                         status = "OK(Unit numbers match)"
                     else:
                         status = "!!!!! UNIT NUMBERS MISMATCH !!!!!!"
-                        problems.append(f"unit {unit_name_in_obj}: unit number mismatch (OBJ={unit_num_in_obj}, LIB={unit_num_in_intrinsic_lib})")
+                        problems.append(f"unit {unit_name_in_exec}: unit number mismatch (EXEC={unit_num_in_exec}, LIB={unit_num_in_intrinsic_lib})")
                     print(
-                        f"{unit_name_in_obj:<12} Unit-in-OBJ={unit_num_in_obj:<4} Unit-in-LIB={unit_num_in_intrinsic_lib:<4} "
+                        f"{unit_name_in_exec:<12} Unit-in-EXEC={unit_num_in_exec:<4} Unit-in-LIB={unit_num_in_intrinsic_lib:<4} "
                         f"{status} {lib_file_id_note(intrinsic_lib_file_id)}"
                     )
                 else:
-                    print(f"{unit_name_in_obj:<12} Unit-in-OBJ={unit_num_in_obj:<4}   Unit-in-LIB=---- MISSING")
-                    problems.append(f"unit {unit_name_in_obj} (unit number {unit_num_in_obj}) not found in INTRINSIC.LIB")
+                    print(f"{unit_name_in_exec:<12} Unit-in-EXEC={unit_num_in_exec:<4}   Unit-in-LIB=---- MISSING")
+                    problems.append(f"unit {unit_name_in_exec} (unit number {unit_num_in_exec}) not found in INTRINSIC.LIB")
 
-            print(f"\nSegments needed by executable file '{actual_obj_name}':")
+            print(f"\nSegments needed by executable file '{found_exec_file_name}':")
             print("--------------------------------------------------------------")
-            if not obj_segments:
+            if not exec_file_segments:
                 print("(none found)")
-                problems.append(f"no segment table found in file {actual_obj_name} (the file may not be a Lisa executable file)")
-            for offset, seg_name_in_obj, seg_num_in_obj, desc, obj_raw in sorted(obj_segments, key=lambda e: e[1]):
-                matching = [e for e in all_intrinsic_segments if e[1] == seg_name_in_obj]
+                problems.append(f"no segment table found in file {found_exec_file_name} (the file may not be a Lisa executable file)")
+            for offset, seg_name_in_exec, seg_num_in_exec, desc, exec_raw in sorted(exec_file_segments, key=lambda e: e[1]):
+                matching = [e for e in all_intrinsic_segments if e[1] == seg_name_in_exec]
                 if matching:
                     seg_num_in_lib = matching[0][3]
                     intrinsic_lib_file_id = matching[0][6]
                     lib_raw = matching[0][7]
                     # Compare the whole 18-byte segment entry, which includes the segment name, number, Version1, Version2, and other metadata.
-                    if obj_raw == lib_raw:
+                    if exec_raw == lib_raw:
                         status = "OK(18 bytes match)"
                     else:
                         status = "!!!!! 18-BYTE SEGMENT ENTRIES MISMATCH !!!!!"
-                        problems.append(f"segment {seg_name_in_obj}: 18-byte segment entries differ between OBJ and LIB")
+                        problems.append(f"segment {seg_name_in_exec}: 18-byte segment entries differ between EXEC and LIB")
                     print(
-                        f"{seg_name_in_obj:<12}   "
+                        f"{seg_name_in_exec:<12}   "
                         f"{status} {lib_file_id_note(intrinsic_lib_file_id)}"
                     )
-                    if obj_raw != lib_raw:
-                        print(f"{'':<12} OBJ 18 bytes: {obj_raw.hex(' ')}")
-                        print(f"{'':<12} LIB 18 bytes: {lib_raw.hex(' ')}")
+                    if exec_raw != lib_raw:
+                        print(f"{'':<16} EXEC 18 bytes: {exec_raw.hex(' ')}")
+                        print(f"{'':<16} LIB  18 bytes: {lib_raw.hex(' ')}")
                 else:
                     print(
-                        f"{seg_name_in_obj:<12} Segment-in-OBJ={seg_num_in_obj:04X}   "
+                        f"{seg_name_in_exec:<12} Segment-in-EXEC={seg_num_in_exec:04X}   "
                         f"Segment-in-LIB=---- (not found in INTRINSIC.LIB!)  "
                     )
-                    problems.append(f"segment {seg_name_in_obj} (segment number {seg_num_in_obj:04X}) not found in INTRINSIC.LIB")
-
-        # ---- group units and segments by library (lib_file_id byte) ----
-        # if lib_units or lib_segments:
-        #     print("\n=== UNITS AND SEGMENTS GROUPED BY LIBRARY ===")
-        #     print("Both the unit directory and the segment directory carry a")
-        #     print("'lib_file_id' byte; it selects the shared library file")
-        #     print("that holds the code.  A segment is the code of the unit(s)")
-        #     print("in its library, so units and segments are linked by")
-        #     print("lib_file_id rather than by a one-to-one name or number.")
-        #     print()
-
-        #     unit_lib_file_ids = {}
-        #     for off, name, unit, lib_file_id in lib_units:
-        #         unit_lib_file_ids.setdefault(lib_file_id, []).append((name, unit))
-        #     seg_lib_file_ids = {}
-        #     for off, name, num_raw, num, desc, extra, lib_file_id in lib_segments:
-        #         seg_lib_file_ids.setdefault(lib_file_id, []).append((name, num))
-
-        #     req_units = set(requested_units)
-        #     req_segs = set(requested_segs)
-
-        #     for lib_file_id in sorted(set(unit_lib_file_ids) | set(seg_lib_file_ids)):
-        #         libname = lib_file_id_table.get(lib_file_id, "?")
-        #         us = unit_lib_file_ids.get(lib_file_id, [])
-        #         ss = seg_lib_file_ids.get(lib_file_id, [])
-        #         ustr = "  ".join(
-        #             f"{n}({u})" + ("*" if n in req_units else "") for n, u in us
-        #         )
-        #         sstr = "  ".join(
-        #             f"{n}({s})" + ("*" if n in req_segs else "") for n, s in ss
-        #         )
-        #         print(f"lib_file_id {lib_file_id:<3} -> {libname}")
-        #         print(f"   units   ({len(us):<2}): {ustr}")
-        #         print(f"   segments({len(ss):<2}): {sstr}")
-        #         print()
-        #     print("(* = referenced by the OBJ file)")
-        #     print()
+                    problems.append(f"segment {seg_name_in_exec} (segment number {seg_num_in_exec:04X}) not found in INTRINSIC.LIB")
 
         # Detect duplicate unit numbers in INTRINSIC.LIB.
         by_unit = {}
@@ -872,13 +835,33 @@ class LisaExecutableFileAnalyzer(FileSystemWithPerFileCommands):
             for unit_number, names in sorted(duplicates.items()):
                 print(f"unit {unit_number}: " + ", ".join(names))
 
+        # ---- collect the unique library file names used by this executable ----
+        # Each unit/segment the EXEC references points at a shared library file
+        # through the lib_file_id byte of its matching INTRINSIC.LIB entry; the
+        # lib_file_id -> file-name table turns that byte into a file name.  Gather
+        # the names from both the unit and the segment references and de-duplicate them.
+        used_lib_files: set[str] = set()
+        for entry in exec_file_units:
+            m = [e for e in all_intrinsic_units if e[1] == entry[1]]
+            if m:
+                libname = intrinsic_file_id_table.get(m[0][3])
+                if libname is not None:
+                    used_lib_files.add(libname)
+        for entry in exec_file_segments:
+            m = [e for e in all_intrinsic_segments if e[1] == entry[1]]
+            if m:
+                libname = intrinsic_file_id_table.get(m[0][6])
+                if libname is not None:
+                    used_lib_files.add(libname)
+
         # ---- summary ---------------------------------------------------
         if problems:
             print("\n!!!!! PROBLEMS FOUND !!!!! :")
             for problem in problems:
                 print(f"  - {problem}")
         else:
-            print(f"\nEverything matches and all intrinsic library files needed to execute file '{obj_file_name}' are present on the disk image.")
+            used_lib_files_csv = ", ".join(sorted(used_lib_files)) if used_lib_files else "(none)"
+            print(f"\nEverything matches and all intrinsic library files needed to execute file '{found_exec_file_name}' are present on the disk image: {used_lib_files_csv}.")
 
         print("\nDone.")
 
@@ -886,14 +869,14 @@ class LisaExecutableFileAnalyzer(FileSystemWithPerFileCommands):
 def main() -> None:
     if len(sys.argv) != 3:
         print(
-            "Prints the shared (also known as 'intrinsic') libraries used by a Lisa executable file (present on the given disk image).\n"
+            "Prints the shared/intrinsic library units, segments and filenames used by a Lisa executable file (present on the given disk image), e.g. EDITOR.OBJ .\n"
             "Usage:\n"
-            "    python3 AnalyzeLisaExecutableFile.py <disk image file name> <name of executable .OBJ file>"
+            "    python3 AnalyzeLisaExecutableFile.py <disk image file name> <name of executable file>"
         )
         sys.exit(1)
 
     disk_image_file_name = sys.argv[1]
-    obj_file_name = sys.argv[2]
+    executable_file_name = sys.argv[2]
 
     try:
         analyzer = LisaExecutableFileAnalyzer(disk_image_file_name)
@@ -909,7 +892,7 @@ def main() -> None:
         )
         sys.exit(1)
 
-    analyzer.analyze(obj_file_name)
+    analyzer.analyze(executable_file_name)
 
 
 if __name__ == "__main__":
