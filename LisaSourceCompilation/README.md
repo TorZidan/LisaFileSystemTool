@@ -117,9 +117,9 @@ figuring out how to compile the Lisa OS sources in the first place.
 You will need an ESProfile hardware ProFile disk emulator on a Lisa with H ROMS and 1.5 MB of RAM or more (2 MB is the max).
 
 Prepare the file `LOS_Compilation_Base.image` using the instructions above, copy it to an SD card,
-plug it into your ESProfile, power-on the Lisa and boot from the disk image.
+plug it into your ESProfile, power-on the Lisa and boot from the disk image into Lisa Workshop.
 
-  - If you get a boot error, it is most likely because the disk image was created as Lisa Disk 1 (on a Lisa 2/10 where the Widget hard drive is at boot position 1), but now you are trying to boot up from Disk 2 (the case on a Lisa 2/5).
+  - If you get a an error 10738 during boot, it is most likely because the disk image was created as Lisa Disk 1 (on a Lisa 2/10 where the Widget hard drive is at boot position 1), but now you are trying to boot up from Disk 2 (the use case on a Lisa 2/5). A post at https://lisalist2.com/index.php?topic=656.0 suggests a fix: Enter into LisaBug and type the command "sm fcc180 00ff 0055 00aa" (set the memory at location fcc180 to the specified bytes) to clear the PROM "checksum" (whatever that means), and reboot.
 
 In the environment selection dialog, click on "Workshop" and then the "Start" button. You are in Workshop 3.0
 
