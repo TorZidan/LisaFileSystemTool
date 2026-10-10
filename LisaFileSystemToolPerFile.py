@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-#####################################################################################################
+######################################################################################################
 # LisaFileSystemToolPerFile.py implements the "add", "replace", "put", "delete", and "get" commands: #
 # they add / replace / put (add if absent, replace if present) / delete a host file on a disk image, #
 # or save (get) a file from the disk image to a host file.                                           #
@@ -10,22 +10,20 @@
 # ReplaceFileMixin / PutFileMixin / DeleteFileMixin / GetFileMixin classes below).                   #
 #                                                                                                    #
 # Usage:                                                                                             #
-#   python LisaFileSystemToolPerFile.py add      <disk image file name> <host file> <lisa file name> #
-#   python LisaFileSystemToolPerFile.py replace  <disk image file name> <host file> <lisa file name> #
-#   python LisaFileSystemToolPerFile.py put      <disk image file name> <host file> <lisa file name> #
-#   python LisaFileSystemToolPerFile.py delete   <disk image file name> <lisa file name>             #
-#   python LisaFileSystemToolPerFile.py get      <disk image file name> <lisa file name> <host file> #
+#   python3 LisaFileSystemToolPerFile.py add     <disk image file name> <host file> <lisa file name> #
+#   python3 LisaFileSystemToolPerFile.py replace <disk image file name> <host file> <lisa file name> #
+#   python3 LisaFileSystemToolPerFile.py put     <disk image file name> <host file> <lisa file name> #
+#   python3 LisaFileSystemToolPerFile.py delete  <disk image file name> <lisa file name>             #
+#   python3 LisaFileSystemToolPerFile.py get     <disk image file name> <lisa file name> <host file> #
 #                                                                                                    #
 # GetFileMixin also provides read_file_as_bytes(lisa_name), which performs the same read as the      #
 # "get" command but returns the file's data as a bytes object instead of writing a host file; other  #
-# tools (e.g. AnalyzeLisaExecutableFile.py) use it to read files straight from a disk image.        #
-#                                                                                                   #
-# THIS IS EXPERIMENTAL CODE !!!                                                                     #
-#                                                                                                   #
-# Author: TorZidan                                                                                  #
-# Date: Sept 20, 2026                                                                               #
-# License: Published under the GNU General Public License v3.0.                                     #
-#####################################################################################################
+# tools (e.g. AnalyzeLisaExecutableFile.py) use it to read files straight from a disk image.         #
+#                                                                                                    #
+# Author: TorZidan                                                                                   #
+# Date: Sept 20, 2026                                                                                #
+# License: Published under the GNU General Public License v3.0.                                      #
+######################################################################################################
 
 from typing import List, Optional, Tuple
 import os

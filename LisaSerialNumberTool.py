@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 ###################################################################################################
 # LisaSerialNumberTool.py is a standalone Python tool for decoding Apple Lisa serial numbers,     #
-# as found in the LisaEm emulator. Read below for more info.                                      #
+# to print the AppleNet number and the manufacturing date. Read below for more info.              #
 #                                                                                                 #
 # Every Apple Lisa computer has a unique serial number, stored in the VSROM (Video state ROM) on  #
 # the CPU board (and printed on a label under the screen). It can be retrieved in "service mode", #
@@ -12,6 +12,9 @@
 #                                                                                                 #
 # Why is this tool here? It prints the machine_id (derived from the AppleNet number), which is    #
 # used by LOS for file copy protection (aka "serialization").                                     #
+#                                                                                                 #
+# Note: The LisaEm emulator uses the serial number of ff000000000000ff0000000000000000 by default.#
+# It decodes to AppleNet number of 000:00000. (machine _id=0). See the README for more info.      #
 #                                                                                                 #
 # Author: TorZidan                                                                                #
 # Date: Sept 25, 2026                                                                             #

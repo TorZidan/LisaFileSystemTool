@@ -128,9 +128,22 @@ decoded plant / year / day / serial-number fields, the 8-digit BCD AppleNet numb
 If the checksum is invalid, it also prints a "corrected" serial number whose
 checksum passes (the 3 BCD checksum nibbles are rewritten with the computed checksum).
 
+Usage: 
+
 ```
 python3 LisaSerialNumberTool.py <serial number>
 # e.g. python3 LisaSerialNumberTool.py FF028308104050FF0010163504700000
+```
+
+### 1.6 Companion tool: AnalyzeLisaExecutableFile.py - analyzes the libraries used by an executable file
+
+`AnalyzeLisaExecutableFile.py` is a standalone Python tool that prints the shared/intrinsic library units,
+segments and filenames used by a Lisa executable file (on the given disk image), e.g. EDITOR.OBJ .
+
+Usage: 
+
+```
+    python3 AnalyzeLisaExecutableFile.py <disk image file name> <name of executable file>
 ```
 
 ---
@@ -639,7 +652,7 @@ Where, on disk, is the file protection stored? Each file has a "hint sector numb
 
 The "deserialize" command scans all files on the disk image, finds the ones whose **`protected`**  byte is set, and resets it to zero, and also writes "all-zeroes" in the 4-bytes **`machine_id`**. After that, the file will no-longer be protected, so it can be copied-to and run just anywhere (on any Lisa).
 
-How does a "virgin" (never used) LOS floppy disk look like? Consider the LisaDraw 3.1 installation floppy disk. It contains one protected file named '{T4}obj' (the LisaDraw executable) with machine_id:0 (0x00000000) = AppleNet '00000000'. When copying the LisaDraw from from the floppy to your hard disk (via the usual "duplicate then drag"), the special `machine_id:0 + protected:0` is what prompts LOS to pop the message `The Lisa is about to make the first copy of LisaDraw. Afterwards, this copy, and all future copies, can be used only on this Lisa. Is this what you want?`. Once you complete copying the file, both files (the one on the floppy disk and the one on your hard disk) will be updated to contain your Lisa's AppleNet id. And this is why the LisaEm emulator has an AppleNet id of 0 (see it in File->Preferences) : when this file is being copied on LisaEm, LOS will update the file's AppleNet id from 0 to 0, which basically leaves the disk virgin, ready to be used on any Lisa. [Clever](https://lisalist2.com/index.php?topic=65.0)! 
+How does a "virgin" (never used) LOS floppy disk look like? Consider the LisaDraw 3.1 installation floppy disk. It contains one protected file named '{T4}obj' (the LisaDraw executable) with machine_id:0 (0x00000000) = AppleNet '00000000'. When copying the LisaDraw from from the floppy to your hard disk (via the usual "duplicate then drag"), the special `machine_id:0 + protected:0` is what prompts LOS to pop the message `The Lisa is about to make the first copy of LisaDraw. Afterwards, this copy, and all future copies, can be used only on this Lisa. Is this what you want?`. Once you complete copying the file, both files (the one on the floppy disk and the one on your hard disk) will be updated to contain your Lisa's AppleNet id. And this is why the LisaEm emulator has an AppleNet id of 0 (see it in File->Preferences, it is encoded in the serial number "ff000000000000ff0000000000000000" used by default by LisaEm) : when a protected file is being copied on LisaEm, LOS will update the file's AppleNet id from 0 to 0 (both on the floppy disk and on the hard disk), which basically leaves the disk virgin, ready to be used on any Lisa. [Clever!](https://lisalist2.com/index.php?topic=65.0)! 
 
 Note: In prior literature (by others), "deserialization" meant "reset the machine_id of a protected file to 0". Here it means "reset the machine_id of a protected file to 0 and set the protected flag to 0", which basically turns a protected file into a regular LOS file.
 
