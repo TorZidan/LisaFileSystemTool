@@ -27,9 +27,15 @@ from datetime import datetime, timezone
 from io import BufferedReader, BytesIO
 from typing import BinaryIO, List
 import os
-import psutil
 import struct
 import sys
+
+try:
+    import psutil
+except ImportError:
+    psutil = None  # Optional: used only for the "disk image open by another process" safety check
+
+_PSUTIL_MISSING_WARNING_SHOWN = False
 
 DC42_HEADER_SIZE = 0x54  # = 84 bytes
 SECTOR_SIZE_IN_BYTES = 512
@@ -416,6 +422,9 @@ class InMemoryFileSystem:
         Check if the disk image file (self._file_name) is currently open by any
         running process.
 
+        Requires the optional 'psutil' library; if it is not installed, the check
+        is skipped (a note is printed once) and False is returned.
+
         Works on Linux, macOS, and Windows, but note:
         - Requires elevated privileges (root/admin) to see files opened
             by processes you don't own; otherwise those processes are skipped.
@@ -426,6 +435,16 @@ class InMemoryFileSystem:
             True if the file is open by at least one process, False otherwise.
 
         """
+        global _PSUTIL_MISSING_WARNING_SHOWN
+        if psutil is None:
+            if not _PSUTIL_MISSING_WARNING_SHOWN:
+                print(
+                    "NOTE: The optional 'psutil' library is not installed, so the safety check"
+                    " for whether this disk image file is currently open by another process is"
+                    " skipped. Install it with: pip install psutil"
+                )
+                _PSUTIL_MISSING_WARNING_SHOWN = True
+            return False
         target_path = os.path.abspath(self._file_name)
         for proc in psutil.process_iter(["pid", "name"]):
             try:
