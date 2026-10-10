@@ -763,10 +763,42 @@ The maximum possible date is: 2037-02-06 06:28:15 GMT (i.e. value 0xFFFFFFFF = 4
 
 ## 9. FAQ
 
-* Can this tool remove password protections? Answer: No. Long answer: LOS allows setting up a password for specific files (select the file's icon, then use the File->Attributes of ..." menu to set/remove a password). The password is being encrypted and stored in the "hint sector" of the file and it can be printed by this too (see function `print_hint_sector_info()`). The `deserialize` tool command does not deal with these files, but this feature could be added. 
+* Can this tool remove password protections? 
 
-* Let's say LOS was installed on a ProiFile hard drive attached at the lower port on a dual-port paralel card in Slot 1. It his information stored somewhere on the disk volume? 
-Answer: yes, it seems that the boot device number is stored in the tag of the boot sector 0, field vol_id, and also in the tags of all "loader" sectors, same field, same values. All other sectors have a vol_id=0. See LOS sources file SOURCE-FSINIT1.TEXT.unix.txt : the possible values are 0..39. What this means: if you attach a disk image on another slot / paralel port (from the one it was installed on), it may fail to boot (as we have seen "in the field").
+    Answer: No. Long answer: LOS allows setting up a password for specific files (select the file's icon, then use the File->Attributes of ..." menu to set/remove a password). The password is being encrypted and stored in the "hint sector" of the file and it can be printed by this too (see function `print_hint_sector_info()`). The `deserialize` tool command does not deal with these files, but this feature could be added. 
+
+* Let's say LOS was installed on a ProiFile hard drive attached at the lower port on a dual-port paralel card in Slot 1. It his information stored somewhere on the disk volume?
+
+    Answer: yes, it seems that the boot device number is stored in the tag of the boot sector 0, field vol_id, and also in the tags of all "loader" sectors, same field, same values. All other sectors have a vol_id=0. See LOS sources file SOURCE-FSINIT1.TEXT.unix.txt : the possible values are 0..39. What this means: if you attach a disk image on another slot / paralel port (from the one it was installed on), it may fail to boot (as we have seen "in the field").
+
+* Can I somehow "enlarge" / "extend" a disk volume into a larger size (because it's nearly-full)? 
+
+    Answer: the most-popular Profile hard disk volumes look like this in the "visualize" command:
+
+    ```
+    5 MB volume: Sector counts by type: B=1 L=29 M=1 P=3  S=32  C=118 H=111  ?=4   .=5188  (total 9728  sectors)
+    10 MB volume: Sector counts by type: B=1 L=28 M=2 P=5  S=36  C=12  H=59   ?=23  .=15621 (total 19456 sectors)
+    50 MB volume: Sector counts by type: B=1 L=28 M=2 P=23 S=166 C=281 H=1768 ?=319 .=19005 (total 94208 sectors)
+
+    Here is the legend:
+      B = boot sector,
+      L = loader sector,
+      M = MDDF sector,
+      P = allocation bitmap sector,
+      S = s-record (slist) sector,
+      C = B-tree catalog sector,
+      H = hint (hentry) sector,
+      ? = allocated sector of unknown kind (tag says free, or names a file not in the slist),
+      . = free sector
+
+    ```
+
+    As we can see, it would be very difficult to "enlarge" e.g. a 5 MB voume into a 10MB, because the sector layouts are very different.
+
+    However, what you can do is:
+    - Use the `python3 LisaFileSystemTool.py dump-flatten <disk image file name>` to dump all files to the host computer.
+    - Install the same software (e.g. LOS 2.0) on a blank, larger disk image file.
+    - Use multiple `python3 LisaFileSystemToolPerFile.py put <disk image file name> <host filename> <lisa filename>` commands to overwrite all files on the fresly-installed volume with the files we dumped above. It should work.
 
 ---
 
