@@ -13,14 +13,14 @@ image files in this folder:
 
 The commands are exercised through the real command-line interface (the tools
 are started as subprocesses). Every command runs against a fresh copy of the
-image in /tmp/LisaFileSystemToolTests/<image name>/ -- the original image
+image in <system temp dir>/LisaFileSystemToolTests/<image name>/ -- the original image
 files in this folder are never modified.
 
 For each image the tests check:
   * exit codes (0 = success, 1 = failure, 3 = "nothing to do" for the
     PerFile commands),
   * expected output lines,
-  * side effects: files written to /tmp/LisaFileSystemDump by 'dump',
+  * side effects: files written to <system temp dir>/LisaFileSystemDump by 'dump',
     host files written by 'get', the new volume name after 'rename-volume',
     the corrected DC42 header checksums after 'fix-dc42-checksum', and the
     add/replace/put/delete changes made visible by 'get' and 'list'.
@@ -34,10 +34,10 @@ Usage:
     python3 tests/run_tests.py                 # run all five images
     python3 tests/run_tests.py <image> [...]   # run only the given image(s)
 
-Cleanup: /tmp/LisaFileSystemDump is removed after every image's tests, and
+Cleanup: <system temp dir>/LisaFileSystemDump is removed after every image's tests, and
 the working directory of an image is removed once all of its checks have
 passed. If any check for an image fails, that image's working directory is
-KEPT in /tmp/LisaFileSystemToolTests/<image name>/ so the modified copies
+KEPT in <system temp dir>/LisaFileSystemToolTests/<image name>/ so the modified copies
 can be inspected; the next run starts by wiping the whole tree anyway.
 
 Exit status: 0 if every test passed, 1 otherwise.
@@ -48,6 +48,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(TESTS_DIR)
@@ -55,11 +56,13 @@ TOOL = os.path.join(REPO_ROOT, "LisaFileSystemTool.py")
 TOOL_PERFILE = os.path.join(REPO_ROOT, "LisaFileSystemToolPerFile.py")
 PYTHON = sys.executable or "python3"
 
-# The 'dump'/'dump-flatten' commands always write here (hard-coded in
-# LisaFileSystemTool.py), so the tests must clean it up between runs:
-DUMP_DIR = "/tmp/LisaFileSystemDump"
+# The 'dump'/'dump-flatten' commands always write here (derived from the
+# system temp directory in LisaFileSystemTool.py: /tmp on Linux/macOS,
+# C:\Users\<user>\AppData\Local\Temp on Windows), so the tests must clean it
+# up between runs:
+DUMP_DIR = os.path.join(tempfile.gettempdir(), "LisaFileSystemDump")
 # All image copies and host files used by the tests live here:
-WORK_ROOT = "/tmp/LisaFileSystemToolTests"
+WORK_ROOT = os.path.join(tempfile.gettempdir(), "LisaFileSystemToolTests")
 
 IMAGES = [
     "floppy-sony400k-LisaDraw3.0.dc42",
@@ -230,7 +233,7 @@ def test_dump(results, image, info, copy):
     files = list_dump_files()
     results.check(
         image,
-        "dump: wrote file(s) to /tmp/LisaFileSystemDump",
+        f"dump: wrote file(s) to {DUMP_DIR}",
         len(files) > 0,
         f"{len(files)} file(s) found; output: {out[-2000:]}",
     )
@@ -243,7 +246,7 @@ def test_dump_flatten(results, image, info, copy):
     files = list_dump_files()
     results.check(
         image,
-        "dump-flatten: wrote file(s) to /tmp/LisaFileSystemDump",
+        f"dump-flatten: wrote file(s) to {DUMP_DIR}",
         len(files) > 0,
         f"{len(files)} file(s) found; output: {out[-2000:]}",
     )

@@ -29,6 +29,7 @@ from typing import BinaryIO, List
 import os
 import struct
 import sys
+import tempfile
 
 try:
     import psutil
@@ -1619,7 +1620,9 @@ class InMemoryFileSystem:
             print_bytes_in_hex_and_ascii(bitmap_sector_bytes)
 
     def _dump_destination(self, file_name: str, flatten: bool = False):
-        """Compute the host file path a Lisa file is dumped to under /tmp/LisaFileSystemDump.
+        """Compute the host file path a Lisa file is dumped to under the dump folder
+        (the system temp directory + '/LisaFileSystemDump'; e.g. /tmp/LisaFileSystemDump
+        on Linux/macOS, C:\\Users\\<user>\\AppData\\Local\\Temp\\LisaFileSystemDump on Windows).
 
         By default a '/' in the Lisa file name becomes a host folder separator: a
         file named 'apbg/BG1A.TEXT' is written into the apbg/ subfolder of the dump
@@ -1629,7 +1632,7 @@ class InMemoryFileSystem:
         Returns the full output path, or None if the (possibly flattened) name would
         escape the dump folder (a leading '/' or a '..' component) and must be skipped.
         """
-        output_root = "/tmp/LisaFileSystemDump"
+        output_root = os.path.join(tempfile.gettempdir(), "LisaFileSystemDump")
         host_name = file_name.replace("/", "-") if flatten else file_name
         output_filename = os.path.normpath(os.path.join(output_root, host_name))
         if not output_filename.startswith(output_root + os.sep):
@@ -1638,10 +1641,11 @@ class InMemoryFileSystem:
 
     def dump_files(self, flatten: bool = False):
         """
-        Dumps all files from the dc42 image to the host file system, into folder /tmp/LisaFileSystemDump (it creates the folder if not present).
+        Dumps all files from the dc42 image to the host file system, into the dump folder
+        (the system temp directory + '/LisaFileSystemDump'; it creates the folder if not present).
         By default it preserves the directory structure: a '/' in a Lisa file name
         becomes a subfolder. With flatten=True, a '/' is replaced with '-' instead, so
-        all files are dumped into the single /tmp/LisaFileSystemDump folder (the 'dump-flatten'
+        all files are dumped into the single dump folder (the 'dump-flatten'
         command). Does not attempt to rename the files in any other way.
 
         How it works:
@@ -3161,7 +3165,8 @@ class InMemoryFileSystem:
 
     def _dump_files_flat_catalog(self, flatten: bool = False):
         """fs_version 14/15 variant of dump_files(): write the contents of every file in the
-        slist to folder /tmp/LisaFileSystemDump, following each file's tag chain (see
+        slist to the dump folder (the system temp directory + '/LisaFileSystemDump'),
+        following each file's tag chain (see
         flat_catalog_read_file_data()). The rootcatalog itself is not dumped as a file.
         By default a '/' in a file name becomes a subfolder; with flatten=True it is
         replaced with '-' (see dump_files() and _dump_destination()).
@@ -3170,7 +3175,7 @@ class InMemoryFileSystem:
         the CR line endings are converted to host "\n" (see
         lisa_text_file_to_host_text()).
         """
-        output_dir = "/tmp/LisaFileSystemDump"
+        output_dir = os.path.join(tempfile.gettempdir(), "LisaFileSystemDump")
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
             print(f"Created directory: {output_dir}")
@@ -3985,13 +3990,14 @@ if __name__ == "__main__":
                 " (B=boot, L=loader, M=MDDF, P=bitmap, S=s-record, C=catalog, H=hentry,"
                 " 9..2=data of the 8 largest files, 1=data of all other files, ?=unknown allocated, .=free)."
             )
+            dump_dir = os.path.join(tempfile.gettempdir(), "LisaFileSystemDump")
             print(
-                "  dump           Dump all files from the disk image into folder /tmp/LisaFileSystemDump"
+                f"  dump           Dump all files from the disk image into folder {dump_dir}"
                 " (a '/' in a Lisa file name becomes a subfolder there)."
             )
             print(
                 "  dump-flatten   Like 'dump', but a '/' in a Lisa file name is replaced with a '-'"
-                ", so all files are dumped into the /tmp/LisaFileSystemDump folder (no subfolders are being created)."
+                f", so all files are dumped into the {dump_dir} folder (no subfolders are being created)."
             )
             print(
                 "                 Note: two file names that differ only by '/' vs '-' (e.g. 'a/b.txt'"
