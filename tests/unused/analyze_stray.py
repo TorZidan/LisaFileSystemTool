@@ -15,8 +15,10 @@ and cross-checks:
 
 import struct
 import sys
+from pathlib import Path
 
-sys.path.insert(0, "/home/ivo/github/LisaFileSystemTool")
+# This file lives in tests/unused/, so the repository root is two folders up:
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from LisaFileSystemTool import (
     InMemoryFileSystem,
     pascal_to_string,
@@ -24,7 +26,7 @@ from LisaFileSystemTool import (
     to_uint32_big_endian,
 )
 
-IMAGE = sys.argv[1] if len(sys.argv) > 1 else "/home/ivo/Downloads/BaCISPlus/good.dc42"
+IMAGE = sys.argv[1] if len(sys.argv) > 1 else "../profile-LOS3.1.image"
 
 t = InMemoryFileSystem(IMAGE)
 mddf = t._mddf_sector_number
