@@ -23,7 +23,7 @@
 # License: Published under the GNU General Public License v3.0.                                     #
 #####################################################################################################
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from io import BufferedReader, BytesIO
 from typing import BinaryIO, List
 import os
@@ -3835,14 +3835,16 @@ def format_date(date_as_int: int) -> str:
     unix_timestamp = (
         date_as_int - 2177452800
     )  # this is the 1901->1970 offset (same ADJUST as in lisafsh-tool.c)
+
     # Convert the Unix timestamp to a timezone-aware datetime object
-    #    in UTC, then convert it to the system's local timezone.
-    #    This step mimics C's 'localtime(&t)' which gets the local time
-    #    structure, respecting Daylight Saving Time.
-    dt_object_utc = datetime.fromtimestamp(unix_timestamp, tz=timezone.utc)
-    dt_object_local = (
-        dt_object_utc.astimezone()
-    )  # Converts to the system's local timezone
+    # in UTC, then convert it to the system's local timezone.
+    # This step mimics C's 'localtime(&t)' which gets the local time
+    # structure, respecting Daylight Saving Time.
+    dt_object_utc = datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=unix_timestamp)
+    try:
+        dt_object_local = dt_object_utc.astimezone()  # Converts to the system's local timezone
+    except (OSError, OverflowError, ValueError):
+        dt_object_local = dt_object_utc  # Windows cannot localize pre-1970 dates; show UTC
     # Format the datetime object into the desired string format.
     #    This is equivalent to C's strftime().
     #    The format codes are largely the same.
