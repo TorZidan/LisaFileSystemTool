@@ -11,6 +11,10 @@ image files in this folder:
   LisaFileSystemToolPerFile.py:
       add, replace, put, delete, get
 
+In addition, a negative test runs 'info' against a copy truncated to 10
+bytes: the tool must fail cleanly (exit code 1, readable error message, no
+Python traceback).
+
 The commands are exercised through the real command-line interface (the tools
 are started as subprocesses). Every command runs against a fresh copy of the
 image in <system temp dir>/LisaFileSystemToolTests/<image name>/ -- the original image
@@ -399,6 +403,28 @@ def test_deserialize(results, image, info, copy):
     )
 
 
+def test_truncated_image(results, image, workdir, src):
+    """Run 'info' on a copy truncated to 10 bytes (shorter than the 84-byte
+    DC42 header): the tool must fail cleanly with exit code 1 and a readable
+    error message, not a Python traceback. Regression test for
+    'raise <string literal>' in InMemoryFileSystem.__init__, which in
+    Python 3 surfaces as 'TypeError: exceptions must derive from
+    BaseException' and hides the real error message."""
+    truncated = os.path.join(workdir, "truncated" + os.path.splitext(src)[1])
+    with open(src, "rb") as f:
+        head = f.read(10)
+    with open(truncated, "wb") as f:
+        f.write(head)
+    rc, out = run_tool(TOOL, ["info", truncated])
+    results.check(image, "truncated image: exit code 1", rc == 1, out[-2000:])
+    results.check(
+        image,
+        "truncated image: clean error message, no traceback",
+        "Traceback" not in out and "shorter than the minimum allowed" in out,
+        out[-2000:],
+    )
+
+
 # ---------------------------------------------------------------------------
 # tests for LisaFileSystemToolPerFile.py
 # ---------------------------------------------------------------------------
@@ -674,6 +700,8 @@ def run_image_tests(results, image):
 
         deserialize_copy = fresh_copy(workdir, src, "deserialize" + ext)
         test_deserialize(results, image, info, deserialize_copy)
+
+        test_truncated_image(results, image, workdir, src)
 
         print("  [LisaFileSystemToolPerFile.py]")
         perfile_copy = fresh_copy(workdir, src, "perfile" + ext)

@@ -242,14 +242,18 @@ class InMemoryFileSystem:
         with open(self._file_name, "rb") as file:
             self._file_size = os.fstat(file.fileno()).st_size
             if self._file_size > 100000000:
-                raise "File is longer than the maximum allowed 100,000,000 bytes! Exiting."
+                raise ValueError(
+                    "File is longer than the maximum allowed 100,000,000 bytes! Exiting."
+                )
             if self._file_size < DC42_HEADER_SIZE:
-                raise "File is shorter than the minimum allowed " + str(
-                    DC42_HEADER_SIZE
-                ) + " bytes! Exiting."
+                raise ValueError(
+                    f"File is shorter than the minimum allowed {DC42_HEADER_SIZE} bytes! Exiting."
+                )
             self._file_bytes = file.read()  # Read the whole file
             if len(self._file_bytes) != self._file_size:
-                raise "File size reported by the OS is different from what we could read! Exiting."
+                raise ValueError(
+                    "File size reported by the OS is different from what we could read! Exiting."
+                )
             # For convenience, we can access the in-memory file data through this binary file reader:
             self._file = BytesIO(self._file_bytes)
 
@@ -1492,7 +1496,7 @@ class InMemoryFileSystem:
             hex_string = " ".join(f"{byte:02x}" for byte in tags_bytes)
             print(hex_string)
         else:
-            raise "Unknown tag size!"
+            raise ValueError("Unknown tag size!")
 
     def get_file_id_from_tag_data_for_sector(self, sector_number: int) -> int:
         tag_bytes = self.read_tags_for_sector(sector_number)
@@ -1562,6 +1566,7 @@ class InMemoryFileSystem:
         print(
             f"\nDumping all free sector numbers from the bitmap sectors (with numbers from {first_abs_bitmap_start_sector_number} to {first_abs_bitmap_start_sector_number + num_bitmap_sectors -1}) : "
         )
+        num_free_bitmap_sectors_numbers = 0
         for sector in range(
             first_abs_bitmap_start_sector_number,
             first_abs_bitmap_start_sector_number + num_bitmap_sectors,
@@ -1819,7 +1824,9 @@ class InMemoryFileSystem:
                         )
                         iteration_number += 1
                         if iteration_number > 10000:
-                            raise f"Infinite loop detected while reading contents of file_id {self.get_file_id_type_from_tag_data_for_sector(next_sector_to_read)}, file_name '{file_name}'! Perhaps the file system is corrupted? Exiting."
+                            raise RuntimeError(
+                                f"Infinite loop detected while reading contents of file_id {self.get_file_id_type_from_tag_data_for_sector(next_sector_to_read)}, file_name '{file_name}'! Perhaps the file system is corrupted? Exiting."
+                            )
                     if total_bytes_read < file_size:
                         print(
                             f"WARNING: the sector chain of file '{file_name}' is only {total_bytes_read} bytes long, shorter than its original file size of {file_size}!"
