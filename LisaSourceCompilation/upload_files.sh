@@ -1,22 +1,35 @@
 #!/bin/bash
 #
-# This Linux script "uploads" selected files of the Lisa OS source tree onto the
-# ProFile disk image file LOS_Compilation_Base_original.image (present in this folder).
-# The folder with the Lisa OS source files is given as the first command-line
-# argument.
-# 
+# This shell script (for Linux, macOS, or Windows via Git Bash or Cygwin) "uploads" selected files of the
+# Lisa OS source tree onto the ProFile disk image file LOS_Compilation_Base.image
+# (present in this folder).
+#
 # See the adjacent README.MD file for detailed usage instructions.
 #
-# Brief usage instructions (a modified version of the instructions at https://github.com/alexthecat123/LisaSourceCompilation by Alexander McLeod):
-# 1. Download the file lisa-source.zip from https://info.computerhistory.org/apple-lisa-code and unzip it.
-# 3. cd ... folder-with-unzipped-files.... There should be one sub-folder, named Lisa_Source.
-# 4. Download Alexander McLeod's https://github.com/alexthecat123/LisaSourceCompilation/blob/main/scripts/patch_files.py utility and run it: 
-#    python3 patch_files.py Lisa_Source . It should print "Successfully applied 248/248 patches".
-# 5. cd ... the folder where this shell script is.
-# 6. run this script: ./upload_files.sh <folder-with-Lisa_Source-files>
-#    It will "upload" 861 files onto the disk image. Observe the final message, it should print 
-#    "Done: 861 file(s) added, 0 already present, 0 failure(s)" the first time you run it.
-# 7. There you have it. Mount the LOS_Compilation_Base_original.image disk image in the LisaEm emulator
+# Brief usage instructions (a modified version of the instructions at 
+# https://github.com/alexthecat123/LisaSourceCompilation by Alexander McLeod):
+# 1. Download the file lisa-source.zip from https://info.computerhistory.org/apple-lisa-code.
+#
+# 2. cd ... the folder where this shell script is.
+#
+# 3. run this script: ./upload_files.sh /path/to/lisa-source.zip
+#    It will:
+#      - unzip the file into a temporary folder (/tmp on Linux, or the system temp folder on Windows)
+#      - run the adjacent patch_files.py (note: it is safe to run it multiple times, it will skip already-applied patches)
+#        on the unzipped sources (it should print "Successfully applied 248/248 patches")
+#      - "upload" 861 files onto the disk image LOS_Compilation_Base.image. Observe the final message, it should print
+#        "Done: 861 file(s) added, 0 already present, 0 failure(s)" the first time you run it.
+#    
+#    Note: the temporary folder is removed after a successful run; it is kept (with a note)
+#    if anything fails or you abort with Ctrl+C, so the unzipped sources can be inspected.
+#    Note: the script pauses after unzipping and after patching, waiting for a keypress
+#    before starting the (long) upload step; press Ctrl+C at any time to abort.
+#    Note: Alternatively, you can pass an already-unzipped folder with the Lisa OS
+#    source files; in that case only the unzip step is skipped (patch_files.py is
+#    idempotent, so it runs in both cases; on already-patched files it changes
+#    nothing and reports that there is nothing to do).
+#
+# 4. There you have it. Mount the LOS_Compilation_Base.image disk image in the LisaEm emulator
 #    or on a real Lisa using an ESProfile hardware emulator,
 #    boot into Workshop and run "<ALEX/MAKE/ALL_NODISKS2" to build everything except Lisa Guide.
 #
@@ -36,18 +49,130 @@
 set -u
 
 if [ $# -lt 1 ] || [ -z "${1:-}" ]; then
-    echo "Usage: $0 <folder-containing-all-Lisa-OS-Source-files>" >&2
+    echo "Usage: $0 <path-to-lisa-source.zip>   (or <folder-containing-all-Lisa-OS-Source-files>)" >&2
     exit 2
 fi
-SOURCE_ROOT="$1"
+ARG="$1"
+# Convert a Windows-style path (C:\... or C:/...) to the POSIX form used by
+# Cygwin (/cygdrive/c/...) and Git Bash (/c/...), if cygpath is available.
+if command -v cygpath >/dev/null 2>&1 && printf '%s' "$ARG" | grep -qE '^[A-Za-z]:[\\/]'; then
+    ARG="$(cygpath -u "$ARG")"
+fi
 # Make it an absolute path before cd-ing into this script's own folder
 # (the disk image lives there and the tool is one folder up).
-case "$SOURCE_ROOT" in
+case "$ARG" in
     /*) ;;
-    *) SOURCE_ROOT="$(pwd)/$SOURCE_ROOT" ;;
+    *) ARG="$(pwd)/$ARG" ;;
 esac
-SOURCE_ROOT="${SOURCE_ROOT%/}"
+ARG="${ARG%/}"
 cd "$(dirname "$0")"
+
+# Temporary folder for the unzipped sources (zip workflow only; mktemp -d
+# honors $TMPDIR if set; otherwise /tmp, which under Git Bash maps to
+# C:\Users\<user>\AppData\Local\Temp\).
+TMP_EXTRACT=""
+KEEP_TMP=0
+cleanup() {
+    if [ -n "$TMP_EXTRACT" ]; then
+        if [ "$KEEP_TMP" -eq 1 ]; then
+            echo "NOTE: keeping the unzipped sources at '$TMP_EXTRACT' (remove the folder manually when done)." >&2
+        else
+            rm -rf "$TMP_EXTRACT"
+        fi
+    fi
+}
+trap cleanup EXIT
+
+# On Ctrl+C: keep the unzipped sources (if any) so the user can inspect them.
+on_interrupt() {
+    echo
+    echo "Aborted by user (Ctrl+C)." >&2
+    KEEP_TMP=1
+    exit 130
+}
+trap on_interrupt INT
+
+# Wait for the user to press any key before proceeding to the given next step
+# (Ctrl+C aborts the script, see the INT trap above). If stdin is not a
+# terminal (e.g. the script is run unattended), do not wait -- just note it.
+pause_for_key() {
+    if [ -t 0 ]; then
+        read -r -n 1 -p "Press any key to continue to $1, or Ctrl+C to abort... "
+        echo
+    else
+        echo "NOTE: stdin is not a terminal; continuing to $1 without waiting."
+    fi
+}
+
+if [ -d "$ARG" ]; then
+    # The user already unzipped the sources themselves. They may or may not
+    # have run patch_files.py on them; the script runs it in both cases (it
+    # is idempotent) -- see the patch step below.
+    echo "Using the given folder (skipping the unzip step):"
+    echo "    $ARG"
+    SOURCE_ROOT="$ARG"
+elif [ -f "$ARG" ]; then
+    ZIP_FILE="$ARG"
+    TMP_EXTRACT="$(mktemp -d)"
+    echo "Unzipping '$ZIP_FILE' into folder '$TMP_EXTRACT' ..."
+    if ! python3 -c '
+import sys, zipfile
+zip_path, dest = sys.argv[1], sys.argv[2]
+try:
+    with zipfile.ZipFile(zip_path) as z:
+        names = [n for n in z.namelist() if not n.startswith("__MACOSX/")]
+        z.extractall(dest, members=names)
+except Exception as e:
+    print(f"unzip failed: {e}", file=sys.stderr)
+    sys.exit(1)
+print(f"Unzipped {len(names)} entries.")
+' "$ZIP_FILE" "$TMP_EXTRACT"; then
+        echo "ERROR: failed to unzip '$ZIP_FILE'." >&2
+        KEEP_TMP=1
+        exit 1
+    fi
+    # The zip contains one top-level folder (named Lisa_Source) with the APPS and
+    # LISA_OS subfolders; find it by content, not by the exact name:
+    SOURCE_ROOT=""
+    for d in "$TMP_EXTRACT"/*/; do
+        if [ -d "${d}APPS" ] && [ -d "${d}LISA_OS" ]; then
+            SOURCE_ROOT="${d%/}"
+            break
+        fi
+    done
+    if [ -z "$SOURCE_ROOT" ] && [ -d "$TMP_EXTRACT/APPS" ] && [ -d "$TMP_EXTRACT/LISA_OS" ]; then
+        SOURCE_ROOT="$TMP_EXTRACT"  # the zip had no top-level folder
+    fi
+    if [ -z "$SOURCE_ROOT" ]; then
+        echo "ERROR: no folder with APPS/ and LISA_OS/ subfolders found in '$ZIP_FILE'." >&2
+        KEEP_TMP=1
+        exit 1
+    fi
+    pause_for_key "patch the files"
+else
+    echo "ERROR: '$ARG' is neither an existing file (lisa-source.zip) nor an existing folder." >&2
+    exit 1
+fi
+
+# Patch the sources. patch_files.py is idempotent: on a fresh tree it applies
+# all the patches; on an already-patched tree it changes nothing and reports
+# that there is nothing to do.
+echo "Running patch_files.py on '$SOURCE_ROOT' ..."
+PATCH_OUTPUT="$(python3 patch_files.py "$SOURCE_ROOT" 2>&1)"
+PATCH_STATUS=$?
+echo "$PATCH_OUTPUT"
+# patch_files.py exits 0 even for a partial (broken) result, so check the
+# summary lines: two outcomes are fine -- all patches applied (fresh tree) or
+# nothing to do (already-patched tree); a partial result is a problem.
+if [ "$PATCH_STATUS" -ne 0 ] \
+    || printf '%s\n' "$PATCH_OUTPUT" | grep -qE 'WARNING: (Performed|Applied)' \
+    || ! printf '%s\n' "$PATCH_OUTPUT" | grep -qE 'Successfully (performed|applied)|No (file grafts|patches) applied'; then
+    echo "ERROR: patch_files.py did not report a clean result (see output above)." >&2
+    KEEP_TMP=1
+    exit 1
+fi
+
+pause_for_key "upload the files to the disk image"
 
 IMAGE="LOS_Compilation_Base.image"
 APPS="$SOURCE_ROOT/APPS"

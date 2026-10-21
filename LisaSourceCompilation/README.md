@@ -2,11 +2,11 @@
 # Uploading the Lisa OS source files to a ProFile disk image and compiling them in Lisa Workshop
 
 **Author:** [TorZidan](https://github.com/TorZidan)  
-**Last Updated:** Oct 1, 2026  
+**Last Updated:** Oct 19, 2026  
 
 ## Overview
 
-The presented `upload_files.sh` is a Linux shell script that "uploads" (copies) the (patched) Lisa Office System (aka LOS) source files onto the
+The presented `upload_files.sh` is a shell script (Linux, macOS, or Windows via Git Bash or Cygwin) that "uploads" (copies) the (patched) Lisa Office System (aka LOS) source files onto the
 ProFile disk image **`LOS_Compilation_Base.image`** (included in this repository), so that you can boot the
 image in LisaEm (or on a real Lisa with an ESProfile) and compile the Lisa Ooffice System files (in the Workshop environment).
 
@@ -15,20 +15,37 @@ The shell script uses the `../LisaFileSystemToolPerFile.py` tool  in the parent 
 
 ## What the script does
 
-Given the folder that contains the Lisa OS source tree (it must have
-`APPS/` and `LISA_OS/` subfolders inside), the script:
+Given the file `lisa-source.zip` (downloaded from
+<https://info.computerhistory.org/apple-lisa-code>), the script:
 
-1. **Replaces** the `system.os` on the image with the local
+1. **Unzips** the file into a temporary folder (`/tmp` on Linux,
+   `C:\Users\<user>\AppData\Local\Temp\` on Windows), skipping the
+   `__MACOSX/` metadata folder that the zip contains. The temporary folder
+   is removed after a successful run; it is kept (with a note printed)
+   if anything fails, so the unzipped sources can be inspected.
+2. **Runs** the adjacent [`patch_files.py`](patch_files.py) (a copy of
+   [Alexander McLeod's utility](https://github.com/alexthecat123/LisaSourceCompilation/blob/main/scripts/patch_files.py))
+   on the sources. Two outcomes are fine: `Successfully applied 248/248
+   patches.` (fresh sources) or `No patches applied. Your code has probably
+   already been patched!` (sources that were already patched); a partial
+   result (e.g. `WARNING: Applied 247/248 patches.`) aborts the script.
+3. **Replaces** the `system.os` on the image with the local
    [`system.os`](system.os) from this folder (see the workaround below —
    this is done with the `replace` command).
-2. **Adds** the local [`MAKE-ALL_NODISKS2.TEXT`](MAKE-ALL_NODISKS2.TEXT)
+4. **Adds** the local [`MAKE-ALL_NODISKS2.TEXT`](MAKE-ALL_NODISKS2.TEXT)
    build script, stored on the image as `ALEX/MAKE/ALL_NODISKS2.TEXT`.
    **Adds** the local [`MAKE-CLEAN.TEXT`](MAKE-CLEAN.TEXT)
    build script, stored on the image as `ALEX/MAKE/CLEAN.TEXT`.
-4. **Adds 858 selected source files** from the source tree, from the
+5. **Adds 858 selected source files** from the source tree, from the
    `APPS/` subfolders (APBG, APCL, APDM, APEW, APHP, APIN, APLC, APLD,
    APLL, APLP, APLT, APLW, APPW) and from the `LISA_OS/` subfolders
    (BUILD, GUIDE_APIM, LIBS, OS, TKIN, TKALERT).
+
+Alternatively, instead of the zip file you can pass the folder that contains the
+unzipped Lisa OS source tree (it must have `APPS/` and `LISA_OS/` subfolders
+inside); in that case only the unzip step is skipped. `patch_files.py` runs
+in both cases: it is idempotent, so on an already-patched tree it changes
+nothing and simply reports that there is nothing to do.
 
 All text file new-line symbols (\n or \r\n) are automatically converted to lisa-style new-lines (\r) during the upload.
 
@@ -54,47 +71,54 @@ The "replace" command does not have such bug, and is able to successfully replac
 
 ## Usage
 
-Prerequisites: a Linux host with `python3`, and this project's
-`LisaFileSystemToolPerFile.py` in the parent folder.
+Prerequisites: a Linux, macOS, or Windows (Git Bash or Cygwin) host with
+`python3` (on macOS, install it via the Xcode Command Line Tools or
+Homebrew), and this project's `LisaFileSystemToolPerFile.py` in the parent
+folder. Under Cygwin, use Cygwin's own `python3` (installed via setup.exe):
+unlike Git Bash, Cygwin does not rewrite the `/cygdrive/...` paths it passes
+to native Windows executables, so a python.org Windows python would not
+find the files.
 
 1. Download `lisa-source.zip` from
-   <https://info.computerhistory.org/apple-lisa-code> and unzip it.
+   <https://info.computerhistory.org/apple-lisa-code>.
 
-2. In the folder with the unzipped files there is one subfolder,
-   `Lisa_Source` (that is the source root the script expects).
-
-3. Download Alexander McLeod's
-   [`patch_files.py`](https://github.com/alexthecat123/LisaSourceCompilation/blob/main/scripts/patch_files.py)
-   and run it from inside that folder:
+2. Run the script, passing the path to the zip file:
 
    ```
-   python3 patch_files.py Lisa_Source .
+   ./upload_files.sh /path/to/lisa-source.zip
    ```
 
-   It should print `Successfully applied 248/248 patches`.
-
-4. Run the script, passing the path to the`Lisa_Source` folder:
-
-   ```
-   ./upload_files.sh /path/to/folder-containing-Lisa_Source
-   ```
-   A successful first run ends with:
+   The script unzips the file into a temporary folder, runs the adjacent
+   `patch_files.py` on the unzipped sources (it should print
+   `Successfully applied 248/248 patches`), and then "uploads" the files
+   onto the disk image. A successful first run ends with:
 
    ```
    Done: 861 file(s) added, 0 already present, 0 failure(s).
    ```
 
-5. Mount `LOS_Compilation_Base.image` in the LisaEm emulator, or on a real
+3. Mount `LOS_Compilation_Base.image` in the LisaEm emulator, or on a real
    Lisa using an ESProfile hardware emulator; boot into Workshop and run
    `<ALEX/MAKE/ALL_NODISKS2` to build everything except Lisa Guide.
+
+If you already have the sources unzipped, you can pass
+the `Lisa_Source` folder instead of the zip:
+
+```
+./upload_files.sh /path/to/folder-containing-Lisa_Source
+```
+
+In that case only the unzip step is skipped; `patch_files.py` runs in both
+cases (it is idempotent: on an already-patched tree it changes nothing and
+reports that there is nothing to do).
 
 ## Exit codes
 
 | Code | Meaning |
 |------|---------|
 | 0 | All uploads succeeded (a file that was already on the image counts as "already present", not a failure — so the script can safely be re-run). |
-| 1 | A setup problem (missing source folder / `APPS` / `LISA_OS` / image), or at least one file upload failed. |
-| 2 | Usage error (no folder argument given). |
+| 1 | A setup problem (unzip failed, no `APPS` / `LISA_OS` folder found, `patch_files.py` did not report success, missing image), or at least one file upload failed. |
+| 2 | Usage error (no argument given). |
 
 Each individual upload uses the tool's exit codes: `0` = added,
 `3` = already present, anything else = failure.
