@@ -6,12 +6,23 @@
 
 ## Overview
 
+In January of 2023 Apple open-sourced the Lisa Office System source files. They are available for download at https://info.computerhistory.org/apple-lisa-code .
+
+In June of 2025, young [Alexander McLeod](https://github.com/alexthecat123) figured out how to patch, upload and compile the files on a real Lisa: https://github.com/alexthecat123/LisaSourceCompilation
+
+The source files come with a license limitation: you cannot redistribute, publish, sublicense, sell, rent or transfer them.
+
+So Alex could not publish a ProFile disk image with the source files on it. Instead, he provided [instructions](https://github.com/alexthecat123/LisaSourceCompilation#getting-the-code-onto-your-lisa) for uploading the files to a real Lisa using serial port transfer, so that people can do it themselves.
+It takes many hours to do so.
+
+Now there is a much easier and faster way, using the tools in this repository.
+
 The presented `upload_files.sh` is a shell script (Linux, macOS, or Windows via Git Bash or Cygwin) that "uploads" (copies) the (patched) Lisa Office System (aka LOS) source files onto the
 ProFile disk image **`LOS_Compilation_Base.image`** (included in this repository), so that you can boot the
-image in LisaEm (or on a real Lisa with an ESProfile) and compile the Lisa Ooffice System files (in the Workshop environment).
+image in LisaEm (or on a real Lisa with an ESProfile) and compile the Lisa Office System files (in the Workshop environment).
 
 The shell script uses the `../LisaFileSystemToolPerFile.py` tool  in the parent folder (the `add` and
-`replace` commands — see the project README, §1.3). 
+`replace` commands — see the project [README](../README.md). 
 
 ## What the script does
 
@@ -63,11 +74,11 @@ conditions). The bug lives in `system.os` itself — and the LOS build process
 triggers exactly that: it builds a new `system.os` that is slightly larger
 than the current one and overwrites it, which corrupts the file system; the
 next boot then fails with error **10730** ("system.os is corrupted").
-Ironically, the bug in system.os causes the corruption of the very same file system.os.
+Ironically, the bug in `system.os` causes the corruption of the very same file `system.os`.
 
-The workaround is to pad the original system.os file (of size 185344 bytes) to a new size of 194,000 bytes before running the compilations,
-so that the generated system.os file (of size 193,024 bytes) will be smaller than the current file (of size 194,000), so overwriting it would work just fine.
-The "replace" command does not have such bug, and is able to successfully replace the file.
+The workaround is to replace the original `system.os file` on the disk image with a patched [system.os](system.os) file. In there, we had to pad the original system.os file (of size 185344 bytes) to a new size of 194,000 bytes,
+so that the `system.os` file generated during the compilation (of size 193,024 bytes) will be smaller than the patched file (of size 194,000), so overwriting it would work just fine.
+Note: the "replace" command does not have such bug, and is able to successfully replace the file.
 
 ## Usage
 
@@ -133,7 +144,7 @@ repository. It contains a fresh installation of LOS 3.0 and Workshop 3.0
 plus his build scripts. It does NOT contain the Lisa OS source files.
 
 ## Credits and Thanks
-Thanks to [Alexander McLeod](https://github.com/alexthecat123) for preparing the `LOS_Compilation_Base.image` and for
+Thanks to [Alexander McLeod](https://github.com/alexthecat123) for preparing the `LOS_Compilation_Base.image`, the `patch_files.py` utility, and for
 figuring out how to compile the Lisa OS sources in the first place. 
 
 ## How to compile the Lisa OS sources on a real Lisa 
@@ -168,6 +179,6 @@ Configure LisaEm to use 1.5 MB or RAM, H-ROMs, "I/O ROM of "88". Mount the `LOS_
 
 Then follow the instructions "on a real Lisa" above.
 
-This process has been verified to works repeatedly and consistently well, with no crashes. On my PC, it takes about a minute to "upload" the Lisa OS source files (using the shell script above), and about 5 minutes to compile everything (except LisaGuide) at top emulation speed (Using the Throttle->512Mhz menu).
+This process has been verified to works repeatedly and consistently well, with no crashes. On my PC, it takes about a minute to "upload" the Lisa OS source files (using the shell script above), and about 5 minutes to compile everything (except LisaGuide) at top emulation speed (Using the LisaEm Throttle->512Mhz menu).
 
 This opens the doors for a full "write code -> upload it -> build it-> run it -> test it" automated AI development cycle with LisaEm. Exciting times. Enjoy!

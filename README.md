@@ -759,7 +759,7 @@ The maximum possible date is: 2037-02-06 06:28:15 GMT (i.e. value 0xFFFFFFFF = 4
   not line up perfectly with real Lisa profile disk images; the offsets actually used
   here were corrected empirically. Fields marked "verified correct" in
   `MDDF_FIELD_DEFINITIONS` are the load-bearing ones.
-* **DC42 tag checksum skips the first tag** — a quirk inherited from the reference
+* **The DC42 tag checksum skips the first tag** — a quirk in the DC42 original implementation 
   implementation; both verification and `deserialize` honour it.
 * **Raw-image detection is a heuristic** (no `0x0100` at offset 0x52 ⇒ raw).
 * **Stale slist entries** occur on some real images (e.g. Twiggy file `LOS1.01.dc42` found on the webs); the
@@ -849,10 +849,26 @@ The maximum possible date is: 2037-02-06 06:28:15 GMT (i.e. value 0xFFFFFFFF = 4
 
 * The tools at https://github.com/tfrikker/lisa_utils/tree/master/srcBuilder can list and dump files from a DC42 disk image. There is also an attempt to implement "add file", but it fails for me. Perhaps I did not try hard enough...
 
-## 12. Disclaimer
+
+## 12. Lisa Source files compilation
+
+In January of 2023 Apple open-sourced the Lisa Office System source files. They are available for download at https://info.computerhistory.org/apple-lisa-code .
+
+In June of 2025, young [Alexander McLeod](https://github.com/alexthecat123) figured out how to patch, upload and compile the files on a real Lisa: https://github.com/alexthecat123/LisaSourceCompilation
+
+The source files come with a license limitation: you cannot redistribute, publish, sublicense, sell, rent or transfer them.
+
+So Alex could not publish a ProFile disk image with the source files on it. Instead, he provided [instructions](https://github.com/alexthecat123/LisaSourceCompilation#getting-the-code-onto-your-lisa) for uploading the files to a real Lisa using serial port transfer, so that people can do it themselves.
+It takes many hours to do so.
+
+Now there is a much easier and faster way, using the tools in this repository.
+
+Find all details in subfolder [LisaSourceCompilation](/LisaSourceCompilation/README.md) 
+
+## 13. Disclaimer
 
 I used AI in this project, to write some of the code and parts of this doc.
 
-## 13. License
+## 14. License
 
 Published under the GNU General Public License v3.0.
