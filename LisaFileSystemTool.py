@@ -23,6 +23,8 @@
 # License: Published under the GNU General Public License v3.0.                                     #
 #####################################################################################################
 
+from __future__ import annotations
+
 from datetime import datetime, timedelta, timezone
 from io import BufferedReader, BytesIO
 from typing import BinaryIO, List
@@ -34,7 +36,7 @@ import tempfile
 try:
     import psutil
 except ImportError:
-    psutil = None  # Optional: used only for the "disk image open by another process" safety check
+    psutil = None  # Optional: used only for the "is the disk image open by another process" safety check. To install it, run "pip install psutil".
 
 _PSUTIL_MISSING_WARNING_SHOWN = False
 
@@ -341,7 +343,7 @@ class InMemoryFileSystem:
                     f"Sector data size: {SECTOR_SIZE_IN_BYTES} (a hard-coded constant in the code)"
                 )
                 print(
-                    f"Sector tags size: {self._single_tag_size} : {tag_size_str} : {"OK" if tag_size_str!="UNKNOWN!" else "BAD!"}"
+                    f"Sector tags size: {self._single_tag_size} : {tag_size_str} : {'OK' if tag_size_str!='UNKNOWN!' else 'BAD!'}"
                 )
                 if self._file_size < (
                     DC42_HEADER_SIZE
@@ -356,30 +358,30 @@ class InMemoryFileSystem:
                 )
                 print(f"Disk Name in DC42 header: {disk_name}")
                 print(
-                    f"Data Size: {self._num_sectors* SECTOR_SIZE_IN_BYTES:7} bytes = {self._num_sectors:4} sectors of 512 bytes each {"OK" if self._num_sectors in({800,1600,1702,9728,19456}) else "UNUSUAL!"}"
+                    f"Data Size: {self._num_sectors* SECTOR_SIZE_IN_BYTES:7} bytes = {self._num_sectors:4} sectors of 512 bytes each {'OK' if self._num_sectors in({800,1600,1702,9728,19456}) else 'UNUSUAL!'}"
                 )
                 print(
-                    f"Tag Size:  {(self._single_tag_size*self._num_sectors):7} bytes = {self._num_sectors:4} sectors of  {self._single_tag_size} bytes each {"OK" if self._num_sectors in({0, 800,1600,1702,9728,19456}) else "UNUSUAL!"}"
+                    f"Tag Size:  {(self._single_tag_size*self._num_sectors):7} bytes = {self._num_sectors:4} sectors of  {self._single_tag_size} bytes each {'OK' if self._num_sectors in({0, 800,1600,1702,9728,19456}) else 'UNUSUAL!'}"
                 )
                 print(
                     f"Extra padding after header,data,tags: {self._file_size-(DC42_HEADER_SIZE + self._num_sectors* SECTOR_SIZE_IN_BYTES + self._single_tag_size*self._num_sectors)} bytes."
                 )
                 print(f"Data Checksum in header: {data_checksum:#010x}")
                 print(
-                    f"Computed Data Checksum:  {computed_data_checksum:#010x} : {"OK" if data_checksum==computed_data_checksum else "BAD!"}"
+                    f"Computed Data Checksum:  {computed_data_checksum:#010x} : {'OK' if data_checksum==computed_data_checksum else 'BAD!'}"
                 )
                 print(f"Tag Checksum in header:  {tag_checksum:#010x}")
                 print(
-                    f"Computed Tag Checksum:   {computed_tags_checksum:#010x} : {"OK" if tag_checksum==computed_tags_checksum else "BAD!"}"
+                    f"Computed Tag Checksum:   {computed_tags_checksum:#010x} : {'OK' if tag_checksum==computed_tags_checksum else 'BAD!'}"
                 )
                 print(
-                    f"Disk Type:   {disk_type:#04x} = {disk_type_str:10} : {"OK" if disk_type_str!="UNKNOWN!" else "BAD!"}"
+                    f"Disk Type:   {disk_type:#04x} = {disk_type_str:10} : {'OK' if disk_type_str!='UNKNOWN!' else 'BAD!'}"
                 )
                 print(
-                    f"Format:      {disk_format:#04x} = {disk_format_str:10} : {"OK" if disk_format_str!="UNKNOWN!" else "BAD!"}"
+                    f"Format:      {disk_format:#04x} = {disk_format_str:10} : {'OK' if disk_format_str!='UNKNOWN!' else 'BAD!'}"
                 )
                 print(
-                    f"DC42 Magic number:{magic_number:#06x}            : {"OK" if magic_number==0x0100 else "BAD!"}"
+                    f"DC42 Magic number:{magic_number:#06x}            : {'OK' if magic_number==0x0100 else 'BAD!'}"
                 )
 
             # Derive the MDDF (Media Descriptor Data File) sector number from the boot sector (sector 0),

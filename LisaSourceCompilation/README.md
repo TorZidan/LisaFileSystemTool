@@ -83,7 +83,7 @@ Note: the "replace" command does not have such bug, and is able to successfully 
 ## Usage
 
 Prerequisites: a Linux, macOS, or Windows (Git Bash or Cygwin) host with
-`python3` (on macOS, install it via the Xcode Command Line Tools or
+`python3` version 3.9 or higher (on macOS, install it via the Xcode Command Line Tools or
 Homebrew), and this project's `LisaFileSystemToolPerFile.py` in the parent
 folder. Under Cygwin, use Cygwin's own `python3` (installed via setup.exe):
 unlike Git Bash, Cygwin does not rewrite the `/cygdrive/...` paths it passes

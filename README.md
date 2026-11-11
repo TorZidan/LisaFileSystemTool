@@ -45,6 +45,10 @@ The document has two parts:
 
 ## 1. Using the tool
 
+Prerequisites: a Linux, macOS, or Windows (Git Bash or Cygwin) host with
+`python3` version 3.9 or higher (on macOS, install it via the Xcode Command Line Tools or
+Homebrew).
+
 ### 1.1 LisaFileSystemTool.py - listing and dumping all files, deserializing LOS applications, and more
 
 ```
