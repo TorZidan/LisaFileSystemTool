@@ -1960,6 +1960,41 @@ class ReplaceFileMixin(AddFileMixin):
                 free_set.discard(p)
         data_pages = reused_pages + new_pages
 
+        # ---- locate the file map / smallmap and its capacity (read-only) ----
+        if is_btree:
+            map_abs = mddf + old_hintaddr  # the smallmap is inlined into hint page 0
+            sm_off = smallmap_off
+        else:
+            if map_offset >= hintsize:
+                print(
+                    f"ERROR: map_offset ({map_offset}) is beyond hintsize ({hintsize}); cannot update the file map."
+                )
+                return 1
+            map_abs = mddf + old_hintaddr + map_offset
+            sm_off = smallmap_off  # 0 on classic volumes; 0x80 on hintsize-1 volumes
+        sm = bytearray(self.read_sector(map_abs))
+        maxent = struct.unpack(">H", sm[sm_off + 4 : sm_off + 6])[0]
+
+        # Reusing the old pages in place can push the run count past the map's
+        # capacity (e.g. the old file already uses all 9 smallmap runs and the
+        # new one is a page longer). In that case relocate the whole file into
+        # one contiguous free run (never overlapping the old pages, so the
+        # bitmap update below stays a plain set-new / clear-freed) and free
+        # all the old pages.
+        if maxent != 0 and len(self._group_runs(data_pages)) > maxent:
+            free_set = set(self._bitmap_free_pages()) - set(old_chain)
+            ds = self._find_contiguous_run(free_set, num_new_pages)
+            if ds is not None:
+                print(
+                    f"NOTE: reusing the old pages would need more than {maxent} run(s) in the file map; "
+                    f"relocating the whole file to {num_new_pages} contiguous page(s) instead."
+                )
+                keep = 0
+                reused_pages = []
+                freed_pages = list(old_chain)
+                new_pages = [ds + i for i in range(num_new_pages)]
+                data_pages = new_pages
+
         END = 0xFFFFFF
         modified = set()
 
@@ -1983,19 +2018,6 @@ class ReplaceFileMixin(AddFileMixin):
             modified.add(absn)
 
         # ---- file map / smallmap: rewrite it in its hint page, keep the hentry ----
-        if is_btree:
-            map_abs = mddf + old_hintaddr  # the smallmap is inlined into hint page 0
-            sm_off = smallmap_off
-        else:
-            if map_offset >= hintsize:
-                print(
-                    f"ERROR: map_offset ({map_offset}) is beyond hintsize ({hintsize}); cannot update the file map."
-                )
-                return 1
-            map_abs = mddf + old_hintaddr + map_offset
-            sm_off = smallmap_off  # 0 on classic volumes; 0x80 on hintsize-1 volumes
-        sm = bytearray(self.read_sector(map_abs))
-        maxent = struct.unpack(">H", sm[sm_off + 4 : sm_off + 6])[0]
         runs = self._group_runs(data_pages)
         if maxent == 0 or len(runs) > maxent:
             print(
