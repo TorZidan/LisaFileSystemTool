@@ -1,14 +1,14 @@
 # LisaFileSystemTool — a tool for reading and modifying Lisa Office System disk images
 
 **Author:** [TorZidan](https://github.com/TorZidan)  
-**Last Updated:** Sept 23, 2026  
+**Last Updated:** Nov 13, 2026  
 
 ## Overview
 
-Modern floppy and Lisa hard disk hardware emulators (ESProfile, ESFloppy), FloppyEmu) are extremely popular in the Lisa enthusiasts community.
+Modern floppy and Lisa hard disk hardware emulators (ESProfile, ESFloppy, FloppyEmu) are extremely popular in the Lisa enthusiasts community.
 They all store the disk volume on an SD card, in a specific format (either "DC42" or "raw ProFile").
 The LisaEm emulator uses these very same disk image formats.
-Given that these disk image files are of size just a few megabytes, uses are able to freely share them on the webs.
+Given that these disk image files are of size just a few megabytes, users are able to freely share them on the webs.
 It's been a natural curiosity for most to try to understand the format of these image files.
 
 There has been limited success until now, mostly due to the lack of documentation of these HFS-style (Hierarchical File System) B-tree catalog volumes.
@@ -24,7 +24,7 @@ A companion tool, `LisaFileSystemToolPerFile.py` (described in §1.2), extends i
 `add` file, `replace` file, `put` file (aka add-or-replace), `delete` file and `get` file commands: it can add a new file to a disk image,
 replace the contents of an existing file, put a file (add it if absent, replace it if present),
 delete a file, or save a file from the disk image to a host file. Works with both flat-catalog (LOS 1.0/2.0)
-and B-tree (LOS 3.0/3.1) hard-disk volumes.
+and B-tree (LOS 3.0/3.1) hard-disk and floppy volumes (except `add` on 12-byte-tag B-tree floppies).
 It is a thin extension of `LisaFileSystemTool.py` — all the disk-image machinery is imported
 from there, and only the add/replace/put/delete/get-specific code lives in the second file.
 
@@ -47,21 +47,23 @@ The document has two parts:
 
 Prerequisites: a Linux, macOS, or Windows (Git Bash or Cygwin) host with
 `python3` version 3.9 or higher (on macOS, install it via the Xcode Command Line Tools or
-Homebrew).
+Homebrew). Optionally install `psutil` (`pip install psutil`) to enable the safety check
+that warns before modifying a disk image currently open in another process (such as LisaEm).
 
 ### 1.1 LisaFileSystemTool.py - listing and dumping all files, deserializing LOS applications, and more
 
 ```
 python3 LisaFileSystemTool.py <command> <disk image file name>
+python3 LisaFileSystemTool.py rename-volume <disk image file name> <new volume name>
 ```
 
 | Command     | What it does |
 |-------------|--------------|
-| `info`      | Prints useful information about the disk image (format, sector count, disk name, DC42 checksums, disk type/format), then prints the MDDF fields (volume name, version, slist/bitmap/catalog pointers, …) and lists the sector numbers of each predefined sector type (MDDF, bitmap, s-record, catalog, boot, loader, erased, free). |
+| `info`      | Prints useful information about the disk image (format, sector count, disk name, DC42 checksums, disk type/format), then prints the MDDF fields (volume name, version, slist/bitmap/catalog pointers, …) and lists the sector numbers of each predefined sector type (MDDF, bitmap, s-record, catalog, erased, boot, loader). |
 | `list`      | Lists all files on the volume. For file systems of version 16/17 it walks the B-tree catalog (`dump_catalog()`); for file systems of version 14/15 it scans the s-list of the flat-catalog volume (`flat_catalog_list_files()`). |
-| `visualize` | Prints a one-character-per-sector map of the whole volume, 64 sectors per line. |
-| `dump`      | Writes the contents of every file to the host folder **`<temp dir>/LisaFileSystemDump/`** (the system temp directory, e.g. `/tmp` on Linux/macOS or `C:\Users\<user>\AppData\Local\Temp` on Windows; created if missing), preserving the names as stored on disk. The root catalog file itself is skipped, and "empty" file names are skipped. Text files (with file names ending with ".text" ) are dumped as plain host text: the 1024-byte on-disk header page and the null page padding are stripped, and the \r new-line symbols used by LOS are converted to \n, so no further conversion is needed. |
-| `dump-flatten` | Like `dump`, but a '/' in a Lisa file name is replaced with '-', so all files are dumped directly into **`<temp dir>/LisaFileSystemDump/`** (no subfolders). |
+| `visualize` | Prints a one-character-per-sector map of the whole volume, 64 sectors per line (`B`=boot, `L`=loader, `M`=MDDF, `P`=bitmap, `S`=slist, `C`=catalog, `H`=hentry, `9`..`2`=data of the 8 largest files, `1`=data of all other files, `?`=unknown allocated, `.`=free). |
+| `dump`      | Writes the contents of every file (including 0-byte empty files) to the host folder **`<temp dir>/LisaFileSystemDump/`** (the system temp directory, e.g. `/tmp` on Linux/macOS or `C:\Users\<user>\AppData\Local\Temp` on Windows; created if missing), preserving HFS B-tree subdirectories (`DIRENTRY` paths) and `/` characters in Lisa file names as host subfolders. The root catalog file itself, empty names, and unsafe paths (`..` or leading `/`) are skipped. Text files (names ending with `.text`, case-insensitive) are dumped as plain host text: the 1024-byte on-disk header page and null page padding are stripped, optional DLE (`0x10`) leading-space codes are expanded to spaces, and `\r` line endings are converted to `\n`. |
+| `dump-flatten` | Like `dump`, but every `/` in the path/name is replaced with `-`, so all files are dumped directly into **`<temp dir>/LisaFileSystemDump/`** (no subfolders). |
 | `deserialize` | Finds all theft-protected files (see §5.9), asks for y/N confirmation, then rewrites each file's hint sector (so the file can be opened on any machine), and fixes up all affected checksums. |
 | `fix-dc42-checksum`| For DC42 files: checks if the data and tag checksums are correct in the DC42 header, and fixes the incorrect ones, if any. |
 | `rename-volume` | Renames the volume: rewrites the `volname` field (a Pascal string of up to 33 characters, Mac Roman) at offset 12 of the MDDF sector (see §4), then fixes up all affected checksums (the per-sector tag checksum for 20-byte tags, and the DC42 header checksums for DC42 files). The new name is given as the third command-line argument and is validated first (non-empty, ≤ 33 characters, no '/', Mac-Roman encodable); a y/N confirmation is asked before anything is written. |
@@ -102,17 +104,16 @@ a directory or other non-file catalog entry).
 
 If the Lisa file name ends with ".TEXT" (case-insensitive), the code assumes that it's a text file.
 Text files are stored in a special way on the Lisa file system (see [LisaOsTextFileSpecification.txt](./LisaOsTextFileSpecification.txt)),
-so, unlike binary files, there is some extra work we need to do when adding/replacing text files: the host text file is
-converted to the on-disk Lisa text layout : line endings become \r, the text is laid out in 1024-byte "pages" of \r-terminated lines with an
-all-zero 1024-byte header "page" prepended, and the stray trailing 0xFF byte that the Computer
-History Museum Lisa source archive text files have is stripped (if any).
+so, unlike binary files, there is some extra work we need to do when reading and writing text files:
+* When **adding/replacing** text files: the host text file is converted to the on-disk Lisa text layout — line endings become `\r`, the text is laid out in 1024-byte "pages" of `\r`-terminated lines (null-padded after the last line) with an all-zero 1024-byte header "page" prepended, and any stray trailing `0xFF` byte from the Computer History Museum Lisa source archive text files is stripped.
+* When **dumping/getting** text files: the inverse conversion (`lisa_text_file_to_host_text()`) strips the 1024-byte header page and per-page null padding, expands the optional DLE (`0x10` + `32 + count`) leading-space compression code emitted by Lisa text editors into literal spaces, and converts `\r` line endings to `\n`.
 
 ### 1.4 Accepted input files
 
 * **DC42 images** (`.dc42`) — Apple DiskCopy 4.2 format; the normal way LisaEm
   distributes floppy and hard-disk images.
 * **Raw ProFile hard-disk images**  (usually `.image`) — a sequence of `20-byte tag + 512-byte sector data`
-  records, physically stored in 5:1 interleave order (see §4.2 and §4.4).
+  records, physically stored in 5:1 interleave order (see §2.2).
 
 The disk image type is auto-detected: if the 2-byte `fileFormat` field at offset `0x52` is
 `0x0100` (aka DC42 magic number), the file is treated as DC42, otherwise as a raw ProFile image.
@@ -148,6 +149,16 @@ Usage:
 
 ```
     python3 AnalyzeLisaExecutableFile.py <disk image file name> <name of executable file>
+```
+
+### 1.7 Automated test suite
+
+The `tests/` folder contains sample floppy and ProFile disk images (covering LOS 1.0, 2.0, and 3.1 across both DC42 and raw ProFile formats) and an end-to-end test runner that exercises every CLI command on temporary copies:
+
+```
+./tests/run_all_tests.sh
+# or run against specific image(s):
+python3 tests/run_tests.py profile-LOS3.1.image
 ```
 
 ---
@@ -249,7 +260,8 @@ Key fields (byte offsets within the MDDF sector):
 | 0x50 | 4 | `init_machine_id` | machine the volume was initialized on |
 | 0x54 | 4 | `master_machine_id` | "for theft protection" |
 | 0x58…0x67 | 4 each | `DT_created`, `DT_copy_created`, `DT_copied`, `DT_scavenged` | dates (see §6.3) |
-| 0x6C | 4 | `firstblock` / `lastblock` (0x6C/0x6E) | first/last absolute block of the volume |
+| 0x6C | 2 | `firstblock` | first absolute block of the volume (per `MDDF_FIELD_DEFINITIONS`) |
+| 0x6E | 3 | `lastblock` | last absolute block of the volume (per `MDDF_FIELD_DEFINITIONS`) |
 | 0x74 | 4 | `blockcount` | number of blocks on the disk |
 | 0x78 | 4 | `blocksize` | bytes per block (512) |
 | 0x80 | 4 | `MDDFaddr` | page where the MDDF starts |
@@ -265,9 +277,11 @@ Key fields (byte offsets within the MDDF sector):
 | 0x9E | 2 | `empty_file` | minimum fid of all unused s-file ids |
 | 0xA0 | 2 | `maxfiles` | maximum s-file index on this device |
 | 0xA2 | 2 | `hintsize` | number of pages in s-file hints |
-| 0xA4/0xA6 | 2 | `leader_offset`, `leader_pages` | file leader location/size in hint pages |
+| 0xA4 | 2 | `leader_offset` | page offset of the file leader in file hints |
+| 0xA6 | 2 | `leader_pages` | number of pages in the file leader |
 | 0xA8 | 2 | `flabel_offset` | byte offset of the file label in the first hint page |
-| 0xAC/0xAE | 2 | `map_offset`, `map_size` | first file map page offset / entries per page |
+| 0xAC | 2 | `map_offset` | page offset of the first file map page |
+| 0xAE | 2 | `map_size` | number of file map entries per page |
 | 0xB0 | 2 | `filecount` | current number of s-files allocated |
 | 0xB2 | 4 | `freestart` | start of free-page search in the bitmap |
 | 0xBA | 4 | `freecount` | number of free pages |
@@ -285,9 +299,9 @@ Key fields (byte offsets within the MDDF sector):
 | 0x12A | 2 | `oem_id` | OEM id |
 | 0x12E | 4 | `root_page` | **MDDF-relative page number of the B-tree catalog root** (fs 16/17) |
 | 0x132 | 2 | `tree_depth` | catalog B-tree depth |
-| 0x134 | 4 | `node_id` | node id |
-| 0x136 | 4 | `vol_seq_no` | volume sequence number |
-| 0x138 | 4 | `vol_mounted` | mounted flag |
+| 0x134 | 2 | `node_id` | node id |
+| 0x136 | 2 | `vol_seq_no` | volume sequence number |
+| 0x138 | 2 | `vol_mounted` | mounted flag |
 
 ---
 
@@ -334,7 +348,7 @@ images), and tells you the medium:
 |--------|------|-------|---------|
 | 0  | 2 | `version`  | page version number |
 | 2  | 2 | `vol_id`   | volume identifier: Set to 0 on most sectors, except set to e.g. 36 for the boot sector  and for the "loader" sectors. |
-| 4  | 2 | `file_id`  | the page's file ID (see §3.3) |
+| 4  | 2 | `file_id`  | the page's file ID (see "File ID types" below) |
 | 6  | 2 | `dataused` | valid bytes in this page's 512 data bytes. The `0x8000` bit is a flag that is set on every tag; the count is `dataused & 0x7FFF`. |
 | 8  | 3 | `abs_num`  | absolute sector number (counted from the MDDF sector) |
 | 11 | 1 | `checksum` | per-sector checksum (see below) |
@@ -428,8 +442,8 @@ Notes:
 
 * The first few s-records can contain garbage (huge, e.g. `0xFFFFFF3D` hint addresses);
   the tool skips records whose hint sector number falls outside the image.
-* On fs 14/15 volumes the scan range is s-files `1 .. empty_file − 1`
-  (`_flat_catalog_sfile_range()`); unused slots have `hintaddr = 0`.
+* On fs 14/15 volumes the tool scans the entire slist (`1 .. slist_packing * slist_block_count - 1`
+  in `_flat_catalog_sfile_range()`, rather than stopping at `empty_file`, which can be stale on some real volumes); unused slots have `hintaddr = 0`.
 * **The slist can go stale.** If a volume is damaged (or a file was moved by tools that
   don't maintain the slist), `hintaddr` may point at a sector that is *not* this file's
   hint page — e.g. another file's data page or a free page — and reading it as an hentry
@@ -550,7 +564,7 @@ Both catalog versions (Flat or B-Tree) converge on the same mechanics, driven by
 
 All data pages of file *N* are tagged `+N`, so an alternative way is to find all sectors whose tag carries the file's id, sort them and read them.
 
-Text files (with file names ending with ".text" ) are handled in a special way: the 1024-byte on-disk header page and the null page padding are stripped, and the \r new-line symbols used by LOS are converted to \n, so no further conversion is needed to view/use the file on the host PC.
+Text files (with file names ending with `.text`, case-insensitive) are handled in a special way: the 1024-byte on-disk header page and the null page padding are stripped, optional DLE (`0x10`) leading-space compression codes are expanded to spaces, and the `\r` new-line symbols used by LOS are converted to `\n`, so no further conversion is needed to view/use the file on the host PC.
 
 ### 5.6 File names
 
@@ -647,7 +661,7 @@ to prevent you using that floppy disk onto multiple Lisas. How it works: when yo
 It seems that all Lisa tools in LOS 1.0 and 2.0 are protected, even some Workshop files (e.g. Pascal.obj - this is the Pascal compiler, and even the Editor app in Editor.obj). 
 However, Apple chose to protect only certain tools in LOS 3.0 and 3.1 (e.g. LisaDraw is protected, LisaWrite is not). 
 
-Note that the whole disk protection framework was (and is) very easy to bypass, if you were aware of it: Just make a fresh copy of each original floppy disk image, use that copy to install whatever you are installing, and then either wipe those floppies, or lablel them "serialized to Lisa AppleNet .....".
+Note that the whole disk protection framework was (and is) very easy to bypass, if you were aware of it: Just make a fresh copy of each original floppy disk image, use that copy to install whatever you are installing, and then either wipe those floppies, or label them "serialized to Lisa AppleNet .....".
 
 The Lisa's "AppleNet" number (e.g. 00102905) is a 4-byte chunk stored along with (as part of) the Lisa's serial number, in the "Video ROM", on the CPU board, and can be also found under the front panel of your Lisa.
 
@@ -656,13 +670,13 @@ Where, on disk, is the file protection stored? Each file has a "hint sector numb
 
 The "deserialize" command scans all files on the disk image, finds the ones whose **`protected`**  byte is set, and resets it to zero, and also writes "all-zeroes" in the 4-bytes **`machine_id`**. After that, the file will no-longer be protected, so it can be copied-to and run just anywhere (on any Lisa).
 
-How does a "virgin" (never used) LOS floppy disk look like? Consider the LisaDraw 3.1 installation floppy disk. It contains one protected file named '{T4}obj' (the LisaDraw executable) with machine_id:0 (0x00000000) = AppleNet '00000000'. When copying the LisaDraw from from the floppy to your hard disk (via the usual "duplicate then drag"), the special `machine_id:0 + protected:0` is what prompts LOS to pop the message `The Lisa is about to make the first copy of LisaDraw. Afterwards, this copy, and all future copies, can be used only on this Lisa. Is this what you want?`. Once you complete copying the file, both files (the one on the floppy disk and the one on your hard disk) will be updated to contain your Lisa's AppleNet id. And this is why the LisaEm emulator has an AppleNet id of 0 (see it in File->Preferences, it is encoded in the serial number "ff000000000000ff0000000000000000" used by default by LisaEm) : when a protected file is being copied on LisaEm, LOS will update the file's AppleNet id from 0 to 0 (both on the floppy disk and on the hard disk), which basically leaves the disk virgin, ready to be used on any Lisa. [Clever!](https://lisalist2.com/index.php?topic=65.0)! 
+How does a "virgin" (never used) LOS floppy disk look like? Consider the LisaDraw 3.1 installation floppy disk. It contains one protected file named '{T4}obj' (the LisaDraw executable) with machine_id:0 (0x00000000) = AppleNet '00000000'. When copying the LisaDraw from the floppy to your hard disk (via the usual "duplicate then drag"), the special `machine_id:0 + protected:1` is what prompts LOS to pop the message `The Lisa is about to make the first copy of LisaDraw. Afterwards, this copy, and all future copies, can be used only on this Lisa. Is this what you want?`. Once you complete copying the file, both files (the one on the floppy disk and the one on your hard disk) will be updated to contain your Lisa's AppleNet id. And this is why the LisaEm emulator has an AppleNet id of 0 (see it in File->Preferences, it is encoded in the serial number "ff000000000000ff0000000000000000" used by default by LisaEm) : when a protected file is being copied on LisaEm, LOS will update the file's AppleNet id from 0 to 0 (both on the floppy disk and on the hard disk), which basically leaves the disk virgin, ready to be used on any Lisa. [Clever!](https://lisalist2.com/index.php?topic=65.0)! 
 
 Note: In prior literature (by others), "deserialization" meant "reset the machine_id of a protected file to 0". Here it means "reset the machine_id of a protected file to 0 and set the protected flag to 0", which basically turns a protected file into a regular LOS file.
 
 More technical details:
 
-* The machine_id is also stored in the MDDF sector: the `init_machine_id` field is populated during the LOS or Workshop installation. The `master_machine_id` field is typically 0; I think it gets populated when you copy/backup/duplicate a ProiFile disk or a floppy disk, at which point the fields `DT_copied`, `DT_copy_created` also get populated. The `deserialize` command does not touch these fields; it seems that they are stored there by LOS for historical record keeping only.
+* The machine_id is also stored in the MDDF sector: the `init_machine_id` field is populated during the LOS or Workshop installation. The `master_machine_id` field is typically 0; I think it gets populated when you copy/backup/duplicate a ProFile disk or a floppy disk, at which point the fields `DT_copied`, `DT_copy_created` also get populated. The `deserialize` command does not touch these fields; it seems that they are stored there by LOS for historical record keeping only.
 
 * The "open file" code path (GOPEN,
 `LISA_OS/OS/source-fsui1.text.unix.txt`) allows the file to be opened only if the file
@@ -676,8 +690,8 @@ can convert a machine_id to an AppleNet id, e.g. `machine_id 67624 (0x00010828) 
 The tool's handling:
 
 * `find_protected_files()` / `_find_protected_files_flat_catalog()` — walk the catalog:
-    - for B-tree catalogs: finds every FILEENTRY → slist → hint sector); 
-    - Flat: every slist entry → hint sector)
+    - for B-tree catalogs: finds every FILEENTRY → slist → hint sector; 
+    - Flat: every slist entry → hint sector
 
   , then read the `protected` byte at 0x48 in the hint sector, and report the file name, s_file_id, machine id and hint
   sector number of every protected file.
@@ -687,7 +701,7 @@ The tool's handling:
   `protected = 0` (offset 0x48, 1 byte). With both cleared, GOPEN passes on any
   machine. Because sector data changed, it then:
   * for 20-byte tags: recomputes and writes the **per-sector tag checksum** (tag byte
-    11, §3.2) of the affected hint sector; (12-byte floppy tags have no checksum field —
+    11, §5.0) of the affected hint sector; (12-byte floppy tags have no checksum field —
     nothing to do);
   * for DC42 images: recomputes and writes the **`dataChecksum`** (header offset 0x48)
     and **`tagChecksum`** (offset 0x4C) in the DC42 header.
@@ -736,23 +750,26 @@ The maximum possible date is: 2037-02-06 06:28:15 GMT (i.e. value 0xFFFFFFFF = 4
 |--------|---------|
 | `InMemoryFileSystem.__init__` | Load the image in memory, detect DC42 vs raw, validate sizes and checksums, locate the MDDF (boot sector first, tag scan as fallback), read `fsversion` (must be 14..17). |
 | `print_extra_info` / `print_mddf_sector_info` | `info` command: MDDF fields + list of sectors per file-ID type. |
+| `visualize_volume` | `visualize` command: one-character-per-sector map of the whole volume. |
 | `print_sector_tags` / `pretty_print_tags_for_sector` | Hex/annotated dump of raw tag bytes. |
 | `print_hint_sector_info(n)` | Full annotated decode of one hint sector (hentry + smallmap + protection summary). |
 | `dump_catalog` | Walk the B-tree catalog and print every record (files/directories/threads). |
 | `print_catalog_record` | Decode one catalog record; returns its category. |
 | `find_catalog_root_page_sector_number` | MDDF offset 0x12E → catalog root page. |
 | `flat_catalog_list_files` / `flat_catalog_dump_catalog` | fs 14/15: list files from the slist; dump & verify the hashed rootcatalog. |
-| `flat_catalog_read_file_data` | Read a whole file via its tag chain, honoring `dataused` and `filesize`. |
+| `flat_catalog_read_file_data` | Read a whole file via its tag chain, honoring `dataused`, `filesize`, and tagged-sector recovery. |
+| `lisa_text_file_to_host_text` | Convert on-disk `.TEXT` file bytes (header page, null padding, DLE leading spaces, `\r`) to plain host text. |
 | `_find_rootcatalog_sfile` | Find the s-file whose hentry `ftype` is `rootcat` (2). |
 | `flat_catalog_hash` | Reimplementation of the OS's catalog hash. |
-| `dump_files` / `_dump_files_flat_catalog` | `dump` command: write all files to folder `<temp dir>/LisaFileSystemDump/`. |
+| `dump_files` / `_dump_files_flat_catalog` | `dump` / `dump-flatten` commands: write all files to folder `<temp dir>/LisaFileSystemDump/`. |
 | `get_sentry_for_sfile` | s_file_id → (hint sector, data start sector) via the slist. |
 | `_locate_hint_page_for_sfile` | Validate/relocate a (possibly stale) hintaddr using the tag (`file_id = −s_file_id`, `rel_num = 0`). |
 | `find_protected_files` / `_find_protected_files_flat_catalog` | List all theft-protected files. |
 | `remove_file_protection` | `deserialize` command: clear `machine_id`/`protected`, fix tag + DC42 checksums. |
+| `fix_dc42_checksum` / `fix_invalid_sector_checksums` | `fix-dc42-checksum` command and per-sector 20-byte tag checksum repair. |
 | `rename_volume` | `rename-volume` command: validate the new name, rewrite the 34-byte `volname` Pascal string at MDDF offset 12, fix tag + DC42 checksums. |
 | `is_sector_free_in_bitmap` / `dump_bitmap_sectors` / `dump_free_bitmap_sectors_numbers` / `check_bitmap_for_all_file_data` | Allocation-bitmap inspection and consistency checks. |
-| `derive_mddf_sector_number_from_boot_sector_zero` | Reproduce the boot ROM/loader MDDF derivation (§3.5). |
+| `derive_mddf_sector_number_from_boot_sector_zero` | Reproduce the boot ROM/loader MDDF derivation (§3). |
 
 ---
 
@@ -763,16 +780,15 @@ The maximum possible date is: 2037-02-06 06:28:15 GMT (i.e. value 0xFFFFFFFF = 4
   not line up perfectly with real Lisa profile disk images; the offsets actually used
   here were corrected empirically. Fields marked "verified correct" in
   `MDDF_FIELD_DEFINITIONS` are the load-bearing ones.
-* **The DC42 tag checksum skips the first tag** — a quirk in the DC42 original implementation 
+* **The DC42 tag checksum skips the first tag** — a quirk in the DC42 original
   implementation; both verification and `deserialize` honour it.
 * **Raw-image detection is a heuristic** (no `0x0100` at offset 0x52 ⇒ raw).
 * **Stale slist entries** occur on some real images (e.g. Twiggy file `LOS1.01.dc42` found on the webs); the
   tool recovers by rescanning tags, but a warning is printed.
 * **Stale smallmaps** can occur after a file is shrunk — use the tag chain, not the
   smallmap, for data.
-* The output directory `<temp dir>/LisaFileSystemDump/` is derived from the system temp directory ( e.g. `/tmp` on Linux/macOS or `C:\Users\<user>\AppData\Local\Temp` on Windows); filenames are used verbatim.
-* `deserialize` needs an interactive terminal for the confirmation prompt; without one it
-  aborts safely.
+* The output directory `<temp dir>/LisaFileSystemDump/` is derived from the system temp directory (e.g. `/tmp` on Linux/macOS or `C:\Users\<user>\AppData\Local\Temp` on Windows); HFS subdirectories and `/` in Lisa file names become host subfolders (or `-` in `dump-flatten`), while unsafe names (`..` or leading `/`) are skipped.
+* `deserialize`, `fix-dc42-checksum`, and `rename-volume` need an interactive terminal for confirmation prompts; without one they abort safely.
 * The whole image must fit in memory (and be ≤ 100 MB).
 
 
@@ -782,20 +798,20 @@ The maximum possible date is: 2037-02-06 06:28:15 GMT (i.e. value 0xFFFFFFFF = 4
 
 * Can this tool remove password protections? 
 
-    Answer: No. Long answer: LOS allows setting up a password for specific files (select the file's icon, then use the File->Attributes of ..." menu to set/remove a password). The password is being encrypted and stored in the "hint sector" of the file and it can be printed by this too (see function `print_hint_sector_info()`). The `deserialize` tool command does not deal with these files, but this feature could be added. 
+    Answer: No. Long answer: LOS allows setting up a password for specific files (select the file's icon, then use the File->Attributes of ..." menu to set/remove a password). The password is being encrypted and stored in the "hint sector" of the file and it can be printed by this tool (see function `print_hint_sector_info()`). The `deserialize` tool command does not deal with these files, but this feature could be added. 
 
-* Let's say LOS was installed on a ProiFile hard drive attached at the lower port on a dual-port paralel card in Slot 1. It his information stored somewhere on the disk volume?
+* Let's say LOS was installed on a ProFile hard drive attached at the lower port on a dual-port parallel card in Slot 1. Is this information stored somewhere on the disk volume?
 
-    Answer: yes, it seems that the boot device number is stored in the tag of the boot sector 0, field vol_id, and also in the tags of all "loader" sectors, same field, same values. All other sectors have a vol_id=0. See LOS sources file SOURCE-FSINIT1.TEXT.unix.txt : the possible values are 0..39. What this means: if you attach a disk image on another slot / paralel port (from the one it was installed on), it may fail to boot (as we have seen "in the field").
+    Answer: yes, it seems that the boot device number is stored in the tag of the boot sector 0, field vol_id, and also in the tags of all "loader" sectors, same field, same values. All other sectors have a vol_id=0. See LOS sources file SOURCE-FSINIT1.TEXT.unix.txt : the possible values are 0..39. What this means: if you attach a disk image on another slot / parallel port (from the one it was installed on), it may fail to boot (as we have seen "in the field").
 
 * Can I somehow "enlarge" / "extend" a disk volume into a larger size (because it's nearly-full)? 
 
-    Answer: the most-popular Profile hard disk volumes look like this in the "visualize" command:
+    Answer: the most-popular ProFile hard disk volumes look like this in the "visualize" command:
 
     ```
-    5 MB volume: Sector counts by type: B=1 L=29 M=1 P=3  S=32  C=118 H=111  ?=4   .=5188  (total 9728  sectors)
-    10 MB volume: Sector counts by type: B=1 L=28 M=2 P=5  S=36  C=12  H=59   ?=23  .=15621 (total 19456 sectors)
-    50 MB volume: Sector counts by type: B=1 L=28 M=2 P=23 S=166 C=281 H=1768 ?=319 .=19005 (total 94208 sectors)
+    5 MB volume:  Sector counts: B=1 L=29 M=1 P=3  S=32  C=118 H=111  ... ?=4   .=5188  (total 9728  sectors)
+    10 MB volume: Sector counts: B=1 L=28 M=2 P=5  S=36  C=12  H=59   ... ?=23  .=15621 (total 19456 sectors)
+    50 MB volume: Sector counts: B=1 L=28 M=2 P=23 S=166 C=281 H=1768 ... ?=319 .=19005 (total 94208 sectors)
 
     Here is the legend:
       B = boot sector,
@@ -805,17 +821,19 @@ The maximum possible date is: 2037-02-06 06:28:15 GMT (i.e. value 0xFFFFFFFF = 4
       S = s-record (slist) sector,
       C = B-tree catalog sector,
       H = hint (hentry) sector,
+      9..2 = data sectors of the 8 largest files,
+      1 = data sectors of all other files,
       ? = allocated sector of unknown kind (tag says free, or names a file not in the slist),
       . = free sector
 
     ```
 
-    As we can see, it would be very difficult to "enlarge" e.g. a 5 MB voume into a 10MB, because the sector layouts are very different.
+    As we can see, it would be very difficult to "enlarge" e.g. a 5 MB volume into a 10 MB volume, because the sector layouts are very different.
 
     However, what you can do is:
     - Use the `python3 LisaFileSystemTool.py dump-flatten <disk image file name>` to dump all files to the host computer.
     - Install the same software (e.g. LOS 2.0) on a blank, larger disk image file.
-    - Use multiple `python3 LisaFileSystemToolPerFile.py put <disk image file name> <host filename> <lisa filename>` commands to overwrite all files on the fresly-installed volume with the files we dumped above. It should work.
+    - Use multiple `python3 LisaFileSystemToolPerFile.py put <disk image file name> <host filename> <lisa filename>` commands to overwrite all files on the freshly-installed volume with the files we dumped above. It should work.
 
 ---
 
@@ -840,16 +858,16 @@ The maximum possible date is: 2037-02-06 06:28:15 GMT (i.e. value 0xFFFFFFFF = 4
   (<https://www.discferret.com/wiki/Apple_DiskCopy_4.2>).
 * Lisa serial number format at https://lisalist2.com/index.php?topic=313.0
 * stepleton/bootloader `dc42_build_bootable_disk.py` — DC42 checksum algorithm
-* Lisa Computer Tool Deserialization Documents by David Craig at http://www.applerepairmanuals.com/lisa/deserial/pg02.html
   (<https://github.com/stepleton/bootloader>).
+* Lisa Computer Tool Deserialization Documents by David Craig at http://www.applerepairmanuals.com/lisa/deserial/pg02.html
 * LOS/Workshop text file format at https://www.bitsavers.org/pdf/apple/lisa/toolkit_3.0/Package_2_Examples/17_Lisa_Development_System_Internals_Documentation_Feb84.pdf
   , pages 37 and 38.
 
 ## 11. Relevant  / similar tools:
 
-* The tool at https://github.com/alexthecat123/LOSSerialTool/blob/main/LOSSerialTool.py can deserialize floppy disk images (only). Its "-deserialize -clearbozo" mode does the same as the "deserialize" command of my tool: the -deserialize options clears the machine_id at offset 0x42 in the hint sector of the protecxted file, and the -clearbozo option clears the "protected" flag at offset 0x48 in the same hint sector. Unlike my tool, it does not scan the catalog to list all files, but instead looks for specific bytes in the file to try to locate each "hint sector".
+* The tool at https://github.com/alexthecat123/LOSSerialTool/blob/main/LOSSerialTool.py can deserialize floppy disk images (only). Its "-deserialize -clearbozo" mode does the same as the "deserialize" command of my tool: the -deserialize option clears the machine_id at offset 0x42 in the hint sector of the protected file, and the -clearbozo option clears the "protected" flag at offset 0x48 in the same hint sector. Unlike my tool, it does not scan the catalog to list all files, but instead looks for specific bytes in the file to try to locate each "hint sector".
 
-* The tool at https://github.com/arcanebyte/lisaem/blob/master/src/tools/src/lisafsh-tool.c can list and dump files from a DC42 disk image. It was written by Ray Arachelian (the LisaEm author) long before the LOS source files were open-sources, which was an impressive achievement.
+* The tool at https://github.com/arcanebyte/lisaem/blob/master/src/tools/src/lisafsh-tool.c can list and dump files from a DC42 disk image. It was written by Ray Arachelian (the LisaEm author) long before the LOS source files were open-sourced, which was an impressive achievement.
 
 * The tools at https://github.com/tfrikker/lisa_utils/tree/master/srcBuilder can list and dump files from a DC42 disk image. There is also an attempt to implement "add file", but it fails for me. Perhaps I did not try hard enough...
 
@@ -867,7 +885,7 @@ It takes many hours to do so.
 
 Now there is a much easier and faster way, using the tools in this repository.
 
-Find all details in subfolder [LisaSourceCompilation](/LisaSourceCompilation/README.md) 
+Find all details in subfolder [LisaSourceCompilation](./LisaSourceCompilation/README.md) 
 
 ## 13. Disclaimer
 

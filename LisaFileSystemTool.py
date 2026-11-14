@@ -14,7 +14,7 @@
 # protection causes no harm or loss to Apple.                                                       #
 #                                                                                                   #
 # If you want to "add" files from your host machine to a disk image, use the adjacent tool          #
-# LisaFileSystemToolAddFile.py                                                                      #
+# LisaFileSystemToolPerFile.py                                                                      #
 #                                                                                                   #
 # See the adjacent README.md file for usage.                                                        #
 #                                                                                                   #
@@ -680,10 +680,12 @@ class InMemoryFileSystem:
                         f"  (12-byte floppy tags have no per-sector checksum; no tag update needed.)"
                     )
 
-            # Update the Data and Tags DC42 checksum values in the DC42 header (if this is a DC42 diks image file):
-            # they are now wrong because we changed the sector data.
-            # (No confirmation prompt: the user already confirmed above.)
-            self.fix_dc42_checksum(confirm=False)
+        # Update the Data and Tags DC42 checksum values in the DC42 header (if this is a DC42 disk image file):
+        # they are now wrong because we changed the sector data.
+        # Done outside the 'with file_in_rw_mode:' block so the outer buffered r+b handle is
+        # flushed and closed before fix_dc42_checksum() opens its own r+b handle.
+        # (No confirmation prompt: the user already confirmed above.)
+        self.fix_dc42_checksum(confirm=False)
 
     def fix_invalid_sector_checksums(self):
         """Scan ALL sectors of the image and fix any invalid per-sector tag checksums.
@@ -816,6 +818,9 @@ class InMemoryFileSystem:
                     print(
                         f"  ERROR: sector {sector_number} still invalid after fix (XOR = {x:#04x})!"
                     )
+        if self._is_dc42_format:
+            # Rewriting tag checksum bytes invalidates the DC42 header's tag checksum:
+            self.fix_dc42_checksum(confirm=False)
         print("Done.")
 
     def fix_dc42_checksum(self, confirm: bool = True):
@@ -1407,7 +1412,7 @@ class InMemoryFileSystem:
         The sector_number being passed is an "absolute" sector number, meaning the first sector of the disk image is sector 0,
         vs a "relative" sector number, which is the sector number relative to the MDDF sector (the first sector of the disk image).
         """
-        if sector_number >= self._num_sectors:
+        if sector_number < 0 or sector_number >= self._num_sectors:
             raise ValueError(
                 f"Sector number {sector_number} is out of bounds, because the file has only {self._num_sectors} sectors!"
             )
@@ -1433,7 +1438,7 @@ class InMemoryFileSystem:
         return result
 
     def read_tags_for_sector(self, sector_number: int):
-        if sector_number >= self._num_sectors:
+        if sector_number < 0 or sector_number >= self._num_sectors:
             raise ValueError(
                 f"Sector number {sector_number} is out of bounds, because the file has only {self._num_sectors} sectors!"
             )
@@ -1515,50 +1520,52 @@ class InMemoryFileSystem:
         relative means "it is counted from the mddf sector". Confusing yet?
         """
         rel_sector_number = absolute_sector_number - self._mddf_sector_number
+        if rel_sector_number < 0:
+            # Sectors preceding the MDDF sector (boot/loader area) are outside the allocation bitmap.
+            return False
+        num_bits_in_allocation_bitmap = to_uint32_big_endian(
+            self._mddf_sector_bytes, 0x8C
+        )
+        if rel_sector_number >= num_bits_in_allocation_bitmap:
+            print(
+                f"WARNING: relative sector {rel_sector_number} is beyond the allocation bitmap size ({num_bits_in_allocation_bitmap} bits)."
+            )
+            return False
         first_relative_bitmap_start_sector_number = to_uint32_big_endian(
             self._mddf_sector_bytes, 0x88
-        )  # Stored in the MDDF sector at offsert 0x88 (136 decimal); usually set to 1, whi9ch means that the first bitmap sector is the one immediately after the MDDF sector
+        )  # Stored in the MDDF sector at offset 0x88 (136 decimal); usually set to 1, which means that the first bitmap sector is the one immediately after the MDDF sector
         first_abs_bitmap_start_sector_number = (
             first_relative_bitmap_start_sector_number + self._mddf_sector_number
         )
         num_bitmap_sectors = to_uint16_big_endian(
             self._mddf_sector_bytes, 0x92
         )  # Stored in the MDDF sector at offset 0x92 (146 decimal);
-        relative_bitmap_sector_num = int(
-            rel_sector_number / 4096
+        relative_bitmap_sector_num = (
+            rel_sector_number // 4096
         )  # Each bitmap sector covers 4096 data sectors (512 bytes x 8 bits/byte = 4096 bits)
         if relative_bitmap_sector_num >= num_bitmap_sectors:
             print(
                 f"WARNING: The total number of bitmap sectors is {num_bitmap_sectors}, but we are reaching beyond that, at relative sector number {relative_bitmap_sector_num} (zero-based)"
             )
-        byte_index = int((rel_sector_number - relative_bitmap_sector_num * 4096) / 8)
-        if byte_index < 0 or byte_index > 4095:
-            raise ValueError(
-                f"byte_index must be an integer between 0 and 4095, but got {byte_index} ! This code is wrong!"
-            )
-        bit_offset = (
-            rel_sector_number - relative_bitmap_sector_num * 4096 - byte_index
-        ) % 8
-        if bit_offset < 0 or bit_offset > 7:
-            raise ValueError(
-                f"bit_offset must be an integer between 0 and 7, but got {bit_offset} ! This code is wrong!"
-            )
+            return False
+        bit_within_sector = rel_sector_number % 4096
+        byte_index = bit_within_sector // 8
+        bit_offset = bit_within_sector % 8
         bit_mask = 1 << bit_offset
 
         bitmap_sector_bytes = self.read_sector(
             first_abs_bitmap_start_sector_number + relative_bitmap_sector_num
         )
         bitmap_byte = bitmap_sector_bytes[byte_index]
-        is_free = False if (bitmap_byte & bit_mask != 0) else True
-        return is_free
+        return (bitmap_byte & bit_mask) == 0
 
     def dump_free_bitmap_sectors_numbers(self):
         num_bits_in_allocation_bitmap = to_uint32_big_endian(
             self._mddf_sector_bytes, 0x8C
-        )  # Stored in the MDDF sector at offset 0x8C (140 decimal); there is one bit per sector, so it is usually set to the total number of sectors in the volume  minus the MDDF sector number.
+        )  # Stored in the MDDF sector at offset 0x8C (140 decimal); there is one bit per sector, so it is usually set to the total number of sectors in the volume minus the MDDF sector number.
         first_relative_bitmap_start_sector_number = to_uint32_big_endian(
             self._mddf_sector_bytes, 0x88
-        )  # Stored in the MDDF sector at offsert 0x88 (136 decimal); usually set to 1, whi9ch means that the first bitmap sector is the one immediately after the MDDF sector
+        )  # Stored in the MDDF sector at offset 0x88 (136 decimal); usually set to 1, which means that the first bitmap sector is the one immediately after the MDDF sector
         first_abs_bitmap_start_sector_number = (
             first_relative_bitmap_start_sector_number + self._mddf_sector_number
         )
@@ -1566,7 +1573,7 @@ class InMemoryFileSystem:
             self._mddf_sector_bytes, 0x92
         )  # Stored in the MDDF sector at offset 0x92 (146 decimal);
         print(
-            f"\nDumping all free sector numbers from the bitmap sectors (with numbers from {first_abs_bitmap_start_sector_number} to {first_abs_bitmap_start_sector_number + num_bitmap_sectors -1}) : "
+            f"\nDumping all free sector numbers from the bitmap sectors (with numbers from {first_abs_bitmap_start_sector_number} to {first_abs_bitmap_start_sector_number + num_bitmap_sectors - 1}) : "
         )
         num_free_bitmap_sectors_numbers = 0
         for sector in range(
@@ -1578,20 +1585,18 @@ class InMemoryFileSystem:
                 byte = bitmap_sector_bytes[byte_index]
                 for bit_offset in range(0, 8):
                     bit_mask = 1 << bit_offset
-                    absolute_sector_number = (
+                    rel_sector_number = (
                         (sector - first_abs_bitmap_start_sector_number) * 4096
                         + byte_index * 8
                         + bit_offset
                     )
-                    if (
-                        absolute_sector_number
-                        > num_bits_in_allocation_bitmap + self._mddf_sector_number
-                    ):
+                    if rel_sector_number >= num_bits_in_allocation_bitmap:
                         print(
                             f"Total number of free sectors found in the bitmap: {num_free_bitmap_sectors_numbers}"
                         )
                         return
-                    is_free: bool = False if (byte & bit_mask != 0) else True
+                    absolute_sector_number = rel_sector_number + self._mddf_sector_number
+                    is_free: bool = (byte & bit_mask) == 0
                     if is_free:
                         print(f"Absolute sector {absolute_sector_number} is FREE")
                         num_free_bitmap_sectors_numbers += 1
@@ -1648,203 +1653,216 @@ class InMemoryFileSystem:
 
     def dump_files(self, flatten: bool = False):
         """
-        Dumps all files from the dc42 image to the host file system, into the dump folder
+        Dumps all files from the disk image to the host file system, into the dump folder
         (the system temp directory + '/LisaFileSystemDump'; it creates the folder if not present).
-        By default it preserves the directory structure: a '/' in a Lisa file name
-        becomes a subfolder. With flatten=True, a '/' is replaced with '-' instead, so
-        all files are dumped into the single dump folder (the 'dump-flatten'
-        command). Does not attempt to rename the files in any other way.
+        By default it preserves the directory structure: HFS B-tree subdirectories and '/'
+        characters in Lisa file names become host subfolders. With flatten=True, '/' is
+        replaced with '-' instead, so all files are dumped into the single dump folder
+        (the 'dump-flatten' command). Does not attempt to rename the files in any other way.
 
-        How it works:
-        Read each s-record sector (each such sector contains 36 s-records, one per file).
-        Each s-record is of 14 bytes:
-         - 4 bytes for the file's "hint sector number" (a sector which contains the file name), aka "s_entry.hintaddr" in Lisa sources file LISA_OS/OS/source-sfileio.text.unix.txt
-         - 4 bytes for the file's content start sector number,                                  aka "s_entry.fileaddr" in Lisa sources file LISA_OS/OS/source-sfileio.text.unix.txt
-         - 4 bytes for the file size,                                                           aka "s_entry.filesize" in Lisa sources file LISA_OS/OS/source-sfileio.text.unix.txt
-         - 2 bytes for the file version (typically we see "0001"),                              aka "s_entry.version"  in Lisa sources file LISA_OS/OS/source-sfileio.text.unix.txt
-        To read the full file contents, we start at it's file content start sector number (above); it's tag data has the next file content sector number;
-        We follow the tag data until we find a next sector number of 00FFFFFF, which indicates that we have finished reading the file contents.
-        Note: the number_of_s_records_per_sector (which we read from the MDDF sector) is usually 36: (36 x 14 bytes per s-record = 504 bytes, which fits well into the available 512 sector bytes)
-
-        There is another way (used by lisafsh-tool.c):
-        Read each catalog sector (each such sector contains 8 catalog records, one per file).
-        Each s-record is of 64 bytes which contain the file name and file_id.
-        To read the file contents for the current catalog entry: We find all sectors whose tags have the given file_id, and we read them.
-
+        On flat-catalog volumes (fs_version 14/15), delegates to _dump_files_flat_catalog().
+        On B-tree catalog volumes (fs_version 16/17), walks the B-tree catalog leaf chain to
+        reconstruct HFS directory paths (DIRENTRY parent_id chains) and locate every FILEENTRY
+        (including 0-byte empty files), validates each file's slist entry and hint page, and
+        reads its contents via flat_catalog_read_file_data() (honoring per-sector dataused and
+        tagged-sector recovery). ".TEXT" files are converted to host text via
+        lisa_text_file_to_host_text().
         """
         if self.is_flat_catalog_volume():
             # fs_version 14/15 volumes: there is no B-tree catalog, so use the slist + tag chains instead:
             self._dump_files_flat_catalog(flatten)
             return
-        mddf_sector_bytes = self._mddf_sector_bytes
-        s_records_start_sector_offset_after_mddf = to_uint32_big_endian(
-            mddf_sector_bytes, 0x94
-        )
-        # print(f"S-Records data start sector offset (after the MDDF sector): {s_records_start_sector_offset_after_mddf} ({s_records_start_sector_offset_after_mddf:#010x})")
-        s_records_start_sector_number = (
-            self._mddf_sector_number + s_records_start_sector_offset_after_mddf
-        )
-        # print(f"S-Records data start sector number: {s_records_start_sector_number} ({s_records_start_sector_number:#010x})")
 
-        number_of_s_records_per_sector = to_uint16_big_endian(
-            mddf_sector_bytes, 0x98
-        )  # Usually 36 (36 x 14 bytes per s-record = 504 bytes, which fits well into the available 512 sector bytes)
-        # print(f"number_of_s_entries_per_block: {number_of_s_records_per_sector} ({number_of_s_records_per_sector:#06x})")
+        output_dir = os.path.join(tempfile.gettempdir(), "LisaFileSystemDump")
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+            print(f"Created directory: {output_dir}")
 
-        s_records_sectors_count = to_uint16_big_endian(mddf_sector_bytes, 0x9A)
-        # print(f"s_records_sectors_count: {s_records_sectors_count} ({s_records_sectors_count:#06x})")
-
-        # Read each s-record sector (each such sector contains number_of_s_records_per_sector=36 s-records, one per file).
-        # each s-record is of 14 bytes:
-        #  - 4 bytes for the file's "hint sector number" (a sector which contains the file name), aka "s_entry.hintaddr" in Lisa sources file LISA_OS/OS/source-sfileio.text.unix.txt
-        #  - 4 bytes for the file's content start sector number,                                  aka "s_entry.fileaddr" in Lisa sources file LISA_OS/OS/source-sfileio.text.unix.txt
-        #  - 4 bytes for the file size,                                                           aka "s_entry.filesize" in Lisa sources file LISA_OS/OS/source-sfileio.text.unix.txt
-        #  - 2 bytes for the file version (typically we see "0001"),                              aka "s_entry.version"  in Lisa sources file LISA_OS/OS/source-sfileio.text.unix.txt
-        # To read the full file contents, we start at it's file_content_start_sector_number; it's tag data has the next file content sector number;
-        # so we follow the tag data until we find a next sector number of 00FFFFFF, which indicates that we have finished reading the file contents.
-        for sector in range(
-            s_records_start_sector_number,
-            (s_records_start_sector_number + s_records_sectors_count),
-        ):
-            # print(f"At s-record sector {sector:#6} of type {self.get_file_id_type_from_tag_data_for_sector(sector)}")
-            sector_bytes = self.read_sector(sector)
-            # print_bytes_in_hex_and_ascii(sector_bytes)
-            for s_record_index in range(0, number_of_s_records_per_sector):
-                s_record_data_offset_within_sector = s_record_index * 14
-                # each s-record is 14 bytes
-                # print_bytes_in_hex_and_ascii(sector_bytes[s_record_data_offset_within_sector : s_record_data_offset_within_sector + 14])
-                # The first 4 bytes of the s-record are the "hint sector number":
-                hint_sector_number = (
-                    to_uint32_big_endian(
-                        sector_bytes, s_record_data_offset_within_sector
-                    )
-                    + self._mddf_sector_number
-                )
-                if hint_sector_number > self._num_sectors:
-                    # The first 5 s-records have long, weird hint_sector numbers, e.g. 4294967333. Skip them.
-                    print(
-                        f"Skipping reading too-large hint sector number {hint_sector_number}"
-                    )
-                    continue
-
-                # The next 4 bytes of the s-record are the sector offset (from the mddf sector) where the filee content starts:
-                file_content_start_sector_offset = to_uint32_big_endian(
-                    sector_bytes, s_record_data_offset_within_sector + 4
-                )
-                if file_content_start_sector_offset == 0x00000000:
-                    # print("\n");
-                    continue
-                file_content_start_sector_number = (
-                    file_content_start_sector_offset + self._mddf_sector_number
-                )
-                # Each hint sector describes one file. Observation: each hint sector file id is different, e.g. 0xfeb9, 0xfeba, 0xfebb
-                # print(f"  At hint sector number {hint_sector_number:#6} with file_id {self.get_file_id_type_from_tag_data_for_sector(hint_sector_number)}")
-                hint_sector_bytes = self.read_sector(hint_sector_number)
-                file_name = pascal_to_string(hint_sector_bytes, start=0)
-                file_size = to_uint32_big_endian(
-                    sector_bytes, s_record_data_offset_within_sector + 8
-                )
-                file_version = to_uint16_big_endian(
-                    sector_bytes, s_record_data_offset_within_sector + 12
-                )
+        # Step 1: descend from the B-tree root to the leftmost leaf node:
+        current_page = self.find_catalog_root_page_sector_number()
+        descended_to_leaf = False
+        visited_descent_pages: set[int] = set()
+        while True:
+            if current_page in visited_descent_pages:
                 print(
-                    f"s_record_index={s_record_index}, file_data_start_sector_number={file_content_start_sector_number}, hint_sector_number={hint_sector_number},"
-                    f" file_name={file_name}, file_size={file_size} bytes, file_version={file_version}"
+                    f"WARNING: cycle detected while descending the index nodes at relative page {current_page}; stopping."
                 )
-                if file_name == "" or "\x00" in file_name:
-                    # The file name (from a stale/corrupt hint sector) is empty or contains a
-                    # character that cannot appear in a Linux file name: skip it rather than crash.
-                    print(
-                        f"Skipping file with an invalid file name {file_name!r}: s_record_index={s_record_index}"
-                    )
+                break
+            abs_node_start = self._mddf_sector_number + current_page
+            if abs_node_start < 0 or abs_node_start + 4 > self._num_sectors:
+                print(
+                    f"WARNING: catalog node at relative page {current_page} (absolute sector {abs_node_start}) is out of bounds; stopping."
+                )
+                break
+            visited_descent_pages.add(current_page)
+            node_bytes = self.read_4_sectors(abs_node_start)
+            node_kind = node_bytes[(4 * 512) - 2]  # kind @ 2046: 0 = leaf, 1 = index
+            if node_kind == 0:
+                descended_to_leaf = True
+                break
+            num_index_entries = to_uint16_big_endian(node_bytes, (4 * 512) - 12)
+            first_record_offset = to_uint16_big_endian(node_bytes, (4 * 512) - 14)
+            if num_index_entries == 0 or first_record_offset + 4 > 2036:
+                print(
+                    f"WARNING: malformed index node at relative page {current_page}; stopping."
+                )
+                break
+            child_page = to_uint32_big_endian(node_bytes, first_record_offset)
+            if child_page == current_page or child_page == 0xFFFFFFFF:
+                print(
+                    "WARNING: index node points at itself (or BAD); stopping the descent."
+                )
+                break
+            current_page = child_page
+
+        if not descended_to_leaf:
+            print("Could not descend to a leaf node; no files dumped.")
+            return
+
+        # Step 2: walk the chain of leaf nodes, collecting DIRENTRY and FILEENTRY records:
+        dirs_by_id: dict[int, tuple[int, str]] = {}  # dir_id -> (parent_id, dir_name)
+        file_entries: list[tuple[int, str, int]] = []  # (parent_id, leaf_name, s_file_id)
+        visited_pages: set[int] = set()
+        while current_page not in visited_pages:
+            abs_node_start = self._mddf_sector_number + current_page
+            if abs_node_start < 0 or abs_node_start + 4 > self._num_sectors:
+                print(
+                    f"WARNING: catalog leaf node at relative page {current_page} (absolute sector {abs_node_start}) is out of bounds; stopping."
+                )
+                break
+            visited_pages.add(current_page)
+            node_bytes = self.read_4_sectors(abs_node_start)
+            num_entries = to_uint16_big_endian(
+                node_bytes, (4 * 512) - 12
+            )  # nkeys @ 2036
+            next_page = to_uint32_big_endian(node_bytes, (4 * 512) - 6)  # next @ 2042
+            node_kind = node_bytes[(4 * 512) - 2]  # kind @ 2046
+            if node_kind != 0:
+                print(
+                    f"WARNING: expected a leaf node at relative page {current_page}, but kind={node_kind}. Stopping."
+                )
+                break
+            max_possible_entries = (2036 // 2) - 1
+            if num_entries > max_possible_entries:
+                print(
+                    f"WARNING: catalog leaf node at relative page {current_page} claims {num_entries} entries (max {max_possible_entries}); clamping."
+                )
+                num_entries = max_possible_entries
+
+            for i in range(num_entries):
+                record_start = to_uint16_big_endian(
+                    node_bytes, (4 * 512) - 14 - (2 * i)
+                )
+                record_end = to_uint16_big_endian(
+                    node_bytes, (4 * 512) - 14 - (2 * (i + 1))
+                )
+                if (
+                    record_start == 0xFFFF
+                    or record_end <= record_start
+                    or record_end > 2036
+                ):
                     continue
-
-                # Lisa does not treat '/' as a folder delimiter in file names, but
-                # when saving to the host file system we use it as one (or replace it
-                # with '-' in flatten mode). Skip any name that would otherwise escape
-                # the dump folder (a leading '/' or '..' components).
-                output_filename = self._dump_destination(file_name, flatten)
-                if output_filename is None:
-                    print(
-                        f"Skipping file with an unsafe file name {file_name!r}: s_record_index={s_record_index}"
-                    )
+                record_bytes = node_bytes[record_start:record_end]
+                if len(record_bytes) < 38 or record_bytes[0] != 0x24:
                     continue
-                # Ensure the output directory exists
-                output_dir = os.path.dirname(output_filename)
-                if output_dir and not os.path.exists(output_dir):
-                    os.makedirs(output_dir)
-                    print(f"Created directory: {output_dir}")
-                # Lisa OS text files are special: the on-disk layout is a 1024-byte
-                # header page (formatting metadata, not part of the file's contents)
-                # followed by 1024-byte pages of CR-terminated (0x0D) lines, each
-                # page null-padded after its last line (the first CR-null pair in a
-                # page ends the page). For file names ending in ".TEXT" (case-
-                # insensitive), we dump the inverse of that layout as plain host text:
-                # strip the header page and the null page padding, and convert the CR
-                # line endings to host "\n" (see lisa_text_file_to_host_text()).
-                is_text_file = file_name.upper().endswith(".TEXT")
-                with open(output_filename, "wb") as output_file_handler:
-                    next_sector_to_read = file_content_start_sector_number
-                    iteration_number = (
-                        0  # Safety measure to prevent infinite loops below:
-                    )
-                    total_bytes_read = 0
-                    raw_text_file_bytes = bytearray() if is_text_file else None
-                    while True:
-                        print(
-                            f"  At file content sector {next_sector_to_read:#6} with file_id {self.get_file_id_type_from_tag_data_for_sector(next_sector_to_read)}"
-                        )
-                        file_content_sector_bytes = self.read_sector(
-                            next_sector_to_read
-                        )
-                        if is_text_file:
-                            # Accumulate the whole chain (including the two header
-                            # sectors): the on-disk text layout is converted to host
-                            # text only after the last sector has been read.
-                            raw_text_file_bytes += file_content_sector_bytes
-                        else:
-                            # The file content starts at the very first sector of the
-                            # chain (the s-record's fileaddr points at the file's
-                            # first data sector). The last sector is usually only
-                            # partially used; we truncate to the file size below.
-                            output_file_handler.write(file_content_sector_bytes)
-                        total_bytes_read += len(file_content_sector_bytes)
+                parent_id = to_uint16_big_endian(record_bytes, 1)
+                name_bytes = record_bytes[3:35]
+                null_index = name_bytes.find(b"\x00")
+                key_name = (
+                    name_bytes[:null_index] if null_index != -1 else name_bytes
+                ).decode("mac-roman", errors="replace")
+                etype = (to_uint16_big_endian(record_bytes, 36) >> 8) & 0xFF
+                if etype == 1 and len(record_bytes) >= 40:  # DIRENTRY
+                    dir_id = to_uint16_big_endian(record_bytes, 38)
+                    dirs_by_id[dir_id] = (parent_id, key_name)
+                elif etype == 3 and len(record_bytes) >= 40:  # FILEENTRY
+                    s_file_id = to_uint16_big_endian(record_bytes, 38)
+                    file_entries.append((parent_id, key_name, s_file_id))
 
-                        tags = self.read_tags_for_sector(next_sector_to_read)
-                        # The fwd_link (next sector in the file's data chain) is 3 bytes at tag offsets
-                        # 0x0E..0x10 in 20-byte hard-disk tags, and the low 11 bits of tag bytes 8-9 in
-                        # 12-byte floppy tags; the shared helper decodes both tag sizes:
-                        _, next_sector_from_tag_data, end_sentinel = (
-                            self._decode_tag_dataused_and_fwd_link(tags)
-                        )
+            if next_page == 0xFFFFFFFF or next_page == 0 or next_page == current_page:
+                break
+            current_page = next_page
 
-                        if next_sector_from_tag_data == end_sentinel:
-                            # print(f"  Exiting while true loop, as we found next_sector_from_tag_data={next_sector_from_tag_data:#010x}")
-                            break
-                        next_sector_to_read = (
-                            next_sector_from_tag_data + self._mddf_sector_number
-                        )
-                        iteration_number += 1
-                        if iteration_number > 10000:
-                            raise RuntimeError(
-                                f"Infinite loop detected while reading contents of file_id {self.get_file_id_type_from_tag_data_for_sector(next_sector_to_read)}, file_name '{file_name}'! Perhaps the file system is corrupted? Exiting."
-                            )
-                    if total_bytes_read < file_size:
-                        print(
-                            f"WARNING: the sector chain of file '{file_name}' is only {total_bytes_read} bytes long, shorter than its original file size of {file_size}!"
-                        )
-                    if is_text_file:
-                        # The last sector is only partially used: cut the raw data down
-                        # to the file size before converting (the header page is
-                        # stripped by lisa_text_file_to_host_text()):
-                        if file_size < len(raw_text_file_bytes):
-                            del raw_text_file_bytes[file_size:]
-                        output_file_handler.write(
-                            lisa_text_file_to_host_text(bytes(raw_text_file_bytes))
-                        )
-                    elif total_bytes_read > file_size:
-                        # The file's last sector is only partially used: cut the dump down to the file size:
-                        output_file_handler.truncate(file_size)
+        # Step 3: dump every cataloged file, preserving HFS directory paths:
+        num_files_written = 0
+        for parent_id, leaf_name, s_file_id in file_entries:
+            if leaf_name == "":
+                print(
+                    f"Skipping this empty file name: s_file_id={s_file_id}, file_name='{leaf_name}'"
+                )
+                continue
+            parts = [leaf_name]
+            cur_parent = parent_id
+            seen_parents: set[int] = set()
+            while (
+                cur_parent != 0
+                and cur_parent in dirs_by_id
+                and cur_parent not in seen_parents
+            ):
+                seen_parents.add(cur_parent)
+                cur_parent, parent_name = dirs_by_id[cur_parent]
+                if parent_name:
+                    parts.append(parent_name)
+            file_name = "/".join(reversed(parts))
+
+            if "\x00" in file_name:
+                print(
+                    f"Skipping file with an invalid file name {file_name!r}: s_file_id={s_file_id}"
+                )
+                continue
+
+            entry = self._slist_entry(s_file_id)
+            if entry is None:
+                print(
+                    f"WARNING: no slist entry for file '{file_name}' (s_file_id={s_file_id}); skipping."
+                )
+                continue
+            hintaddr, _fileaddr, filesize, _version = entry
+            if hintaddr == 0 or hintaddr >= 0x7FFFFFFF:
+                print(
+                    f"WARNING: invalid hintaddr={hintaddr:#010x} for file '{file_name}' (s_file_id={s_file_id}); skipping."
+                )
+                continue
+            abs_hint_candidate = self._mddf_sector_number + hintaddr
+            if abs_hint_candidate < 0 or abs_hint_candidate >= self._num_sectors:
+                print(
+                    f"WARNING: out-of-bounds hint sector {abs_hint_candidate} for file '{file_name}' (s_file_id={s_file_id}); skipping."
+                )
+                continue
+            hint_sector_number = self._locate_hint_page_for_sfile(
+                s_file_id, abs_hint_candidate
+            )
+            if hint_sector_number is None:
+                continue
+            hint_bytes = self.read_sector(hint_sector_number)
+            if hint_bytes[0x2C] == 2:  # skip rootcatalog (ftype = rootcat)
+                continue
+
+            file_data = self.flat_catalog_read_file_data(s_file_id)
+            if len(file_data) != filesize:
+                print(
+                    f"WARNING: read {len(file_data)} bytes for file '{file_name}' (s_file_id={s_file_id}), but the slist says its size is {filesize} bytes!"
+                )
+            if file_name.upper().endswith(".TEXT"):
+                file_data = lisa_text_file_to_host_text(file_data)
+
+            output_filename = self._dump_destination(file_name, flatten)
+            if output_filename is None:
+                print(
+                    f"Skipping file with an unsafe file name {file_name!r}: s_file_id={s_file_id}"
+                )
+                continue
+            parent_dir = os.path.dirname(output_filename)
+            if parent_dir and not os.path.exists(parent_dir):
+                os.makedirs(parent_dir)
+                print(f"Created directory: {parent_dir}")
+            with open(output_filename, "wb") as output_file_handler:
+                output_file_handler.write(file_data)
+            num_files_written += 1
+            print(
+                f"Wrote '{file_name}' (s_file_id={s_file_id}, {len(file_data)} bytes) to {output_filename}"
+            )
+        print(f"Done: wrote {num_files_written} file(s) to {output_dir}")
 
     def check_bitmap_for_all_file_data(self):
         """ """
@@ -1855,65 +1873,51 @@ class InMemoryFileSystem:
         s_records_start_sector_offset_after_mddf = to_uint32_big_endian(
             mddf_sector_bytes, 0x94
         )
-        # print(f"S-Records data start sector offset (after the MDDF sector): {s_records_start_sector_offset_after_mddf} ({s_records_start_sector_offset_after_mddf:#010x})")
         s_records_start_sector_number = (
             self._mddf_sector_number + s_records_start_sector_offset_after_mddf
         )
-        # print(f"S-Records data start sector number: {s_records_start_sector_number} ({s_records_start_sector_number:#010x})")
 
         number_of_s_records_per_sector = to_uint16_big_endian(
             mddf_sector_bytes, 0x98
         )  # Usually 36 (36 x 14 bytes per s-record = 504 bytes, which fits well into the available 512 sector bytes)
-        # print(f"number_of_s_entries_per_block: {number_of_s_records_per_sector} ({number_of_s_records_per_sector:#06x})")
 
         s_records_sectors_count = to_uint16_big_endian(mddf_sector_bytes, 0x9A)
-        # print(f"s_records_sectors_count: {s_records_sectors_count} ({s_records_sectors_count:#06x})")
 
-        # Read each s-record sector (each such sector contains number_of_s_records_per_sector=36 s-records, one per file).
-        # each s-record is of 14 bytes:
-        #  - 4 bytes for the file's "hint sector number" (a sector which contains the file name), aka "s_entry.hintaddr" in Lisa sources file LISA_OS/OS/source-sfileio.text.unix.txt
-        #  - 4 bytes for the file's content start sector number,                                  aka "s_entry.fileaddr" in Lisa sources file LISA_OS/OS/source-sfileio.text.unix.txt
-        #  - 4 bytes for the file size,                                                           aka "s_entry.filesize" in Lisa sources file LISA_OS/OS/source-sfileio.text.unix.txt
-        #  - 2 bytes for the file version (typically we see "0001"),                              aka "s_entry.version"  in Lisa sources file LISA_OS/OS/source-sfileio.text.unix.txt
-        # To read the full file contents, we start at it's file_content_start_sector_number; it's tag data has the next file content sector number;
-        # so we follow the tag data until we find a next sector number of 00FFFFFF, which indicates that we have finished reading the file contents.
-        for sector in range(
-            s_records_start_sector_number,
-            (s_records_start_sector_number + s_records_sectors_count),
+        for page_index, sector in enumerate(
+            range(
+                s_records_start_sector_number,
+                (s_records_start_sector_number + s_records_sectors_count),
+            )
         ):
-            # print(f"At s-record sector {sector:#6} of type {self.get_file_id_type_from_tag_data_for_sector(sector)}")
             sector_bytes = self.read_sector(sector)
-            # print_bytes_in_hex_and_ascii(sector_bytes)
             for s_record_index in range(0, number_of_s_records_per_sector):
+                s_file_id = page_index * number_of_s_records_per_sector + s_record_index
+                if s_file_id == 0:
+                    continue
                 s_record_data_offset_within_sector = s_record_index * 14
-                # each s-record is 14 bytes
-                # print_bytes_in_hex_and_ascii(sector_bytes[s_record_data_offset_within_sector : s_record_data_offset_within_sector + 14])
-                # The first 4 bytes of the s-record are the "hint sector number":
-                hint_sector_number = (
-                    to_uint32_big_endian(
-                        sector_bytes, s_record_data_offset_within_sector
-                    )
-                    + self._mddf_sector_number
+                hintaddr = to_uint32_big_endian(
+                    sector_bytes, s_record_data_offset_within_sector
                 )
-                if hint_sector_number > self._num_sectors:
-                    # The first 5 s-records have long, weird hint_sector numbers, e.g. 4294967333. Skip them.
+                if hintaddr == 0 or hintaddr >= 0x7FFFFFFF:
+                    continue
+                hint_sector_number = hintaddr + self._mddf_sector_number
+                if hint_sector_number < 0 or hint_sector_number >= self._num_sectors:
                     print(
-                        f"Skipping reading too-large hint sector number {hint_sector_number}"
+                        f"Skipping reading out-of-bounds hint sector number {hint_sector_number}"
                     )
                     continue
 
-                # The next 4 bytes of the s-record are the sector offset (from the mddf sector) where the filee content starts:
                 file_content_start_sector_offset = to_uint32_big_endian(
                     sector_bytes, s_record_data_offset_within_sector + 4
                 )
-                if file_content_start_sector_offset == 0x00000000:
-                    # print("\n");
+                if (
+                    file_content_start_sector_offset == 0x00000000
+                    or file_content_start_sector_offset >= 0x7FFFFFFF
+                ):
                     continue
                 abs_file_content_start_sector_number = (
                     file_content_start_sector_offset + self._mddf_sector_number
                 )
-                # Each hint sector describes one file. Observation: each hint sector file id is different, e.g. 0xfeb9, 0xfeba, 0xfebb
-                # print(f"  At hint sector number {hint_sector_number:#6} with file_id {self.get_file_id_type_from_tag_data_for_sector(hint_sector_number)}")
                 hint_sector_bytes = self.read_sector(hint_sector_number)
                 file_name = pascal_to_string(hint_sector_bytes, start=0)
                 file_size = to_uint32_big_endian(
@@ -1931,20 +1935,20 @@ class InMemoryFileSystem:
                 iteration_number = 0  # Safety measure to prevent infinite loops below:
 
                 while True:
+                    current_abs_sector = next_abs_sector_to_read
                     is_sector_free_in_bitmap = self.is_sector_free_in_bitmap(
-                        next_abs_sector_to_read
+                        current_abs_sector
                     )
                     print(
-                        f"  At file content absolute sector {next_abs_sector_to_read:#6} with file_id {self.get_file_id_type_from_tag_data_for_sector(next_abs_sector_to_read)}, is_sector_free_in_bitmap={is_sector_free_in_bitmap}"
+                        f"  At file content absolute sector {current_abs_sector:6} with file_id {self.get_file_id_type_from_tag_data_for_sector(current_abs_sector)}, is_sector_free_in_bitmap={is_sector_free_in_bitmap}"
                     )
 
                     if is_sector_free_in_bitmap:
                         print(
-                            f"WARNING: sector {next_abs_sector_to_read:#6} is marked as free in the bitmap, but it is used by file '{file_name}' !"
+                            f"WARNING: sector {current_abs_sector:6} is marked as free in the bitmap, but it is used by file '{file_name}' !"
                         )
-                        # raise ValueError("This ain't right ...")
 
-                    tags = self.read_tags_for_sector(next_abs_sector_to_read)
+                    tags = self.read_tags_for_sector(current_abs_sector)
                     # The fwd_link (next sector in the file's data chain) is 3 bytes at tag offsets
                     # 0x0E..0x10 in 20-byte hard-disk tags, and the low 11 bits of tag bytes 8-9 in
                     # 12-byte floppy tags; the shared helper decodes both tag sizes:
@@ -1953,14 +1957,15 @@ class InMemoryFileSystem:
                     )
 
                     if next_sector_from_tag_data == end_sentinel:
-                        # print(f"  Exiting while true loop, as we found next_sector_from_tag_data={next_sector_from_tag_data:#010x}")
                         break
                     next_abs_sector_to_read = (
                         next_sector_from_tag_data + self._mddf_sector_number
                     )
                     iteration_number += 1
                     if iteration_number > 10000:
-                        raise f"Infinite loop detected while reading contents of file_id {self.get_file_id_type_from_tag_data_for_sector(next_abs_sector_to_read)}, file_name '{file_name}'! Perhaps the file system is corrupted? Exiting."
+                        raise RuntimeError(
+                            f"Infinite loop detected while reading contents of file_id {self.get_file_id_type_from_tag_data_for_sector(current_abs_sector)}, file_name '{file_name}'! Perhaps the file system is corrupted? Exiting."
+                        )
 
     def visualize_volume(self):
         """Print a one-character-per-sector map of the whole volume, 64 sectors per line,
@@ -2827,7 +2832,7 @@ class InMemoryFileSystem:
         if entry is None:
             raise ValueError(f"No slist entry for s_file_id {s_file_id}")
         hintaddr, fileaddr, filesize, version = entry
-        if fileaddr == 0 or filesize == 0:
+        if fileaddr == 0 or fileaddr >= 0x7FFFFFFF or filesize == 0:
             return b""
         if self._single_tag_size not in (12, 20):
             raise ValueError(
@@ -2837,9 +2842,9 @@ class InMemoryFileSystem:
         sector = self._mddf_sector_number + fileaddr
         iterations = 0
         while len(out) < filesize:
-            if sector >= self._num_sectors:
+            if sector < 0 or sector >= self._num_sectors:
                 raise ValueError(
-                    f"Tag chain for sfile {s_file_id} points beyond the last sector (sector {sector} of {self._num_sectors})."
+                    f"Tag chain for sfile {s_file_id} points out of bounds (sector {sector} of {self._num_sectors})."
                 )
             if iterations > 20000:
                 raise ValueError(
@@ -2861,7 +2866,7 @@ class InMemoryFileSystem:
         # data. The per-sector file_id in the tag is the most reliable record of which sectors
         # belong to the file, so in that case read the sectors tagged +s_file_id instead:
         data_start_sector = self._mddf_sector_number + fileaddr
-        if data_start_sector < self._num_sectors:
+        if 0 <= data_start_sector < self._num_sectors:
             data_start_file_id = self.get_file_id_from_tag_data_for_sector(
                 data_start_sector
             )
@@ -3239,7 +3244,7 @@ class InMemoryFileSystem:
             # page followed by 1024-byte pages of CR-terminated lines, null-padded
             # after the last line of each page. Dump them as plain host text, like
             # dump_files() above: the inverse of build_lisa_text_file_data() from
-            # LisaFileSystemToolAddFile.py — strip the header page and the null page
+            # LisaFileSystemToolPerFile.py — strip the header page and the null page
             # padding, and convert the Lisa CR line endings to host "\n".
             if file_name.upper().endswith(".TEXT"):
                 file_data = lisa_text_file_to_host_text(file_data)
@@ -3405,7 +3410,7 @@ def _expand_dle_leading_spaces(line: bytes) -> bytes:
 
 
 def lisa_text_file_to_host_text(file_data: bytes) -> bytes:
-    """The inverse of LisaFileSystemToolAddFile.build_lisa_text_file_data():
+    """The inverse of LisaFileSystemToolPerFile.build_lisa_text_file_data():
     convert the on-disk byte stream of a Lisa ".TEXT" file into plain host text.
 
     The on-disk layout (see LisaOsTextFileSpecification.txt) is a 1024-byte
@@ -3460,7 +3465,7 @@ def lisa_text_file_to_host_text(file_data: bytes) -> bytes:
 
 
 def compute_dc42_checksum_of_file_data_block(
-    file: BufferedReader, data_start: int, data_length: int
+    file: BinaryIO, data_start: int, data_length: int
 ) -> int:
     if (
         data_length > 1000000000
@@ -3472,34 +3477,24 @@ def compute_dc42_checksum_of_file_data_block(
     return compute_dc42_checksum(file_data_bytes)
 
 
-def compute_dc42_checksum(data_bytes: bytearray) -> int:
+def compute_dc42_checksum(data_bytes: bytes | bytearray | memoryview) -> int:
     """Compute checksum DC42 uses to verify sector and tag data integrity.
 
     Shamelessly copied from https://github.com/stepleton/bootloader/blob/master/dc42_build_bootable_disk.py
 
     Args:
-        data: data to compute a checksum for.
+        data_bytes: data to compute a checksum for.
 
     Returns: a 32-bit (big endian) checksum.
     """
-
-    def addl_rorl(uint, csum):
-        """Add `uint` to `csum`; 32-bit truncate; 32-bit rotate right one bit."""
-        csum += uint  # add uint
-        csum &= 0xFFFFFFFF  # truncate
-        rbit = csum & 0x1  # rotate part 1 (save low-order bit)
-        csum >>= 1  # rotate part 2 (shift right)
-        csum += rbit << 31  # rotate part 3 (prepend old low-order bit)
-        return csum
-
-    # Loop over all two-byte words in the data and include them in the checksum.
+    # Stream 16-bit big-endian words directly from a zero-copy memoryview (ignoring any
+    # trailing odd byte on a truncated file) instead of materializing 2-byte slice objects.
+    mv = memoryview(data_bytes)[: len(data_bytes) & ~1]
     checksum = 0
-    for word_bytes in [data_bytes[i : i + 2] for i in range(0, len(data_bytes), 2)]:
-        word = struct.unpack(">H", word_bytes)[0]  # big endian word bytes to native
-        checksum = addl_rorl(word, checksum)  # add to checksum
-
-    # return result as a big-endian 32-bit word.
-    return checksum  # struct.pack('>I', checksum)
+    for (word,) in struct.iter_unpack(">H", mv):
+        checksum = (checksum + word) & 0xFFFFFFFF
+        checksum = (checksum >> 1) | ((checksum & 1) << 31)
+    return checksum
 
 
 def disk_type_to_string(disk_type: int):
