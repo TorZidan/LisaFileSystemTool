@@ -243,8 +243,9 @@ class AddFileMixin:
     """
 
     # =========================================================================
-    #  add: add a host file into a flat-catalog (fs_version 14/15) volume.
-    #  See the docstring of add_file() below for details.
+    #  add: add a host file into a flat-catalog (fs_version 14/15) or b-tree
+    #  (fs_version 16/17) volume, with 12-byte (floppy) or 20-byte (hard disk) tags.
+    #  See the docstrings of add_file() and _add_file_btree() below for details.
     # =========================================================================
 
     def _mddf_u16(self, offset: int) -> int:
@@ -590,11 +591,14 @@ class AddFileMixin:
         (The bitmap and MDDF accounting are done once, by the caller, for all
         pages of the new file.)"""
         freestart = self._mddf_u32(0xB2)
+        max_rel_page = 0x7FE if self._single_tag_size == 12 else 0xFFFFFE
 
         def find_run(hint):
             for s in sorted(free_set):
                 if s < hint:
                     continue
+                if s + 3 > max_rel_page:
+                    break
                 if all((s + i) in free_set for i in (1, 2, 3)):
                     return s
             return None
@@ -912,23 +916,27 @@ class AddFileMixin:
 
     def _add_file_btree(self, host_file_path: str, lisa_name: str) -> int:
         """Add a host file into a b-tree-catalog (fs_version 16/17) volume as a
-        new Lisa file.
+        new Lisa file, supporting both 12-byte-tag (floppy) and 20-byte-tag
+        (hard disk) images.
 
         Mirrors the OS's MAKE_ENTRY path on a b-tree volume (source-fsprim,
         source-sfileio1 new_sfile, source-fsdir Insert): allocate an s-file
         number, allocate hint + data pages, write the hentry (the v17 hentry
-        is 110 bytes, and the smallmap is inlined into hint page 0 at the
+        is 112 bytes, and the smallmap is inlined into hint page 0 at the
         MDDF smallmap_offset), write the data pages, update the slist sentry,
         and insert a 64-byte fileentry ObjRec into the b-tree root catalog via
         _bt_insert.  The MDDF (filecount, freecount, fs_overhead, empty_file,
         and root_page/tree_depth if the tree grows), the allocation bitmap, the
-        tag checksums and the DC42 header checksums are all updated.
+        tag checksums (for 20-byte tags) and the DC42 header checksums are all
+        updated.
 
         Returns the exit code to use: 0 on success, 3 if a file with the
         same name is already on the volume, and 1 on any other failure.
         """
-        if self._single_tag_size != 20:
-            print("ERROR: add currently supports only 20-byte-tag (hard disk) images.")
+        if self._single_tag_size not in (12, 20):
+            print(
+                f"ERROR: add currently supports only 20-byte-tag (hard disk) and 12-byte-tag (floppy) images; this image has {self._single_tag_size}-byte tags."
+            )
             return 1
         if not os.path.isfile(host_file_path):
             print(f"ERROR: host file '{host_file_path}' not found.")
@@ -960,6 +968,19 @@ class AddFileMixin:
                 f"ERROR: '{lisa_name}' is {len(name_bytes)} Mac-Roman bytes; max is {BTREE_MAX_NAME} on a b-tree volume."
             )
             return 1
+
+        # ---- check for duplicate catalog entry (read-only) before modifying anything ----
+        key = self._bt_make_key(0, name_bytes)  # parentID = ROOT_NID
+        try:
+            _, _, _, already_exists = self._bt_search(key)
+        except RuntimeError as e:
+            print(f"ERROR: {e}")
+            return 1
+        if already_exists:
+            print(
+                f"WARNING: a file named '{lisa_name}' already exists on this volume; not adding it."
+            )
+            return 3
 
         # ---- ".TEXT" files (same as the flat path) ----
         is_text_file = lisa_name.upper().endswith(".TEXT")
@@ -1015,14 +1036,15 @@ class AddFileMixin:
             return 1
 
         # ---- find free pages ----
-        # The file needs `needed_pages` pages, and the catalog insert may
-        # allocate up to two new b-tree nodes (a leaf split plus a possible
-        # root split); require room for all of it up front.
+        # In 12-byte floppy tags, links are 11-bit MDDF-relative page numbers
+        # where 0x7FF is the END sentinel, so valid page numbers are < 0x7FF.
         free_pages = self._bitmap_free_pages()
-        if len(free_pages) < needed_pages + 2 * BTREE_NODE_BLKS:
+        if self._single_tag_size == 12:
+            free_pages = [p for p in free_pages if p < 0x7FF]
+        if len(free_pages) < needed_pages:
             print(
-                f"ERROR: not enough free space: need {needed_pages} file pages plus up to "
-                f"{2 * BTREE_NODE_BLKS} b-tree node pages but only {len(free_pages)} free."
+                f"ERROR: not enough free space: need {needed_pages} pages ({hintsize} hint + {num_data_pages} data) "
+                f"but only {len(free_pages)} free."
             )
             return 1
         free_set = set(free_pages)
@@ -1036,15 +1058,37 @@ class AddFileMixin:
             free_set.discard(p)
         if num_data_pages:
             ds = self._find_contiguous_run(free_set, num_data_pages)
-            data_pages = (
-                [ds + i for i in range(num_data_pages)]
-                if ds is not None
-                else sorted(free_set)[:num_data_pages]
-            )
+            if ds is not None:
+                data_pages = [ds + i for i in range(num_data_pages)]
+            else:
+                data_pages = sorted(free_set)[:num_data_pages]
+                if len(self._group_runs(data_pages)) > 9:
+                    # Fragmented volume: pick from the largest contiguous free runs first
+                    # so the file fits within the 9-entry inline smallmap whenever possible.
+                    free_runs = sorted(
+                        self._group_runs(sorted(free_set)),
+                        key=lambda rc: (-rc[1], rc[0]),
+                    )
+                    picked: List[int] = []
+                    rem = num_data_pages
+                    for st, cnt in free_runs:
+                        take = min(cnt, rem)
+                        picked.extend(range(st, st + take))
+                        rem -= take
+                        if rem == 0:
+                            break
+                    data_pages = sorted(picked)
         else:
             data_pages = []
         for p in data_pages:
             free_set.discard(p)
+
+        runs = self._group_runs(data_pages)
+        if len(runs) > 9:
+            print(
+                "ERROR: the file's data pages span more than 9 runs; the smallmap is full."
+            )
+            return 1
 
         # ---- sentry version (the page tags carry it) ----
         spage = new_sfile // slist_packing
@@ -1057,8 +1101,47 @@ class AddFileMixin:
         END = 0xFFFFFF
         modified = set()
 
-        # ---- hint page 0: the hentry, then the smallmap, then (zero) flabel ----
+        # ---- build the 64-byte fileentry ObjRec and insert it into the tree first ----
+        # Running _bt_insert before writing hint/data/slist pages ensures that if a
+        # node split runs out of contiguous free space, we can restore self._file
+        # cleanly without leaving partial state in memory or on disk.
         now = int(time.time()) + 2177452800  # Lisa epoch (seconds since 1901-01-01)
+        rec = bytearray(64)
+        rec[0:36] = key
+        struct.pack_into(">H", rec, 36, 3 << 8)  # eType = fileentry
+        struct.pack_into(">H", rec, 38, new_sfile)
+        struct.pack_into(">I", rec, 40, now)  # fileDTC
+        struct.pack_into(">I", rec, 44, 0)  # fileDTM (never opened)
+        struct.pack_into(">I", rec, 48, filesize)  # size
+        struct.pack_into(">I", rec, 52, num_data_pages * 512)  # physSize (page-aligned)
+        struct.pack_into(">H", rec, 56, 1)  # fsOvrhd
+        # flags = 0 (never opened by the OS), fileUnused = 0
+        free_before = set(free_set)
+        orig_image = self._file.getvalue()
+        try:
+            ok, new_root, actual_depth = self._bt_insert(
+                key, bytes(rec), free_set, modified
+            )
+        except RuntimeError as e:
+            self._file.seek(0)
+            self._file.write(orig_image)
+            self._file.truncate(len(orig_image))
+            print(f"ERROR: {e}")
+            return 1
+        if not ok:
+            print(
+                f"WARNING: a file named '{lisa_name}' already exists on this volume; not adding it."
+            )
+            return 3
+        # the depth the tree has after this insert (measured from the real
+        # tree structure, not from the possibly-stale MDDF field)
+        new_depth = actual_depth + (1 if new_root is not None else 0)
+        # _bt_alloc_node discards all BTREE_NODE_BLKS pages of every allocated
+        # node from free_set, so free_before - free_set is the exact set of new
+        # b-tree node pages (including back-to-back leaf + root split allocations):
+        node_pages = sorted(free_before - free_set)
+
+        # ---- hint page 0: the hentry, then the smallmap, then (zero) flabel ----
         hp = bytearray(512)
         # hentry: the v16/17 hentry is 112 bytes on disk; the 128-byte region
         # is zero-filled and the fields below set it up.  parentID is at 108
@@ -1078,12 +1161,6 @@ class AddFileMixin:
         # smallmap (inlined into hint page 0 on v16/17 volumes)
         struct.pack_into(">I", hp, smallmap_off, num_data_pages)  # size = data pages
         struct.pack_into(">H", hp, smallmap_off + 4, 9)  # max_entries
-        runs = self._group_runs(data_pages)
-        if len(runs) > 9:
-            print(
-                "ERROR: the file's data pages span more than 9 runs; the smallmap is full."
-            )
-            return 1
         struct.pack_into(">H", hp, smallmap_off + 6, len(runs))  # ecount
         for i, (st, cnt) in enumerate(runs):
             struct.pack_into(">I", hp, smallmap_off + 8 + i * 6, st)
@@ -1139,50 +1216,11 @@ class AddFileMixin:
         self._mem_write_sector_data(slist_abs, bytes(sl))
         modified.add(slist_abs)
 
-        # ---- build the 64-byte fileentry ObjRec and insert it into the tree ----
-        key = self._bt_make_key(0, name_bytes)  # parentID = ROOT_NID
-        rec = bytearray(64)
-        rec[0:36] = key
-        struct.pack_into(">H", rec, 36, 3 << 8)  # eType = fileentry
-        struct.pack_into(">H", rec, 38, new_sfile)
-        struct.pack_into(">I", rec, 40, now)  # fileDTC
-        struct.pack_into(">I", rec, 44, 0)  # fileDTM (never opened)
-        struct.pack_into(">I", rec, 48, filesize)  # size
-        struct.pack_into(">I", rec, 52, num_data_pages * 512)  # physSize (page-aligned)
-        struct.pack_into(">H", rec, 56, 1)  # fsOvrhd
-        # flags = 0 (never opened by the OS), fileUnused = 0
-        free_before = set(free_set)
-        try:
-            ok, new_root, actual_depth = self._bt_insert(
-                key, bytes(rec), free_set, modified
-            )
-        except RuntimeError as e:
-            print(f"ERROR: {e}")
-            return 1
-        if not ok:
-            print(
-                f"WARNING: a file named '{lisa_name}' already exists on this volume; not adding it."
-            )
-            return 3
-        # the depth the tree has after this insert (measured from the real
-        # tree structure, not from the possibly-stale MDDF field)
-        new_depth = actual_depth + (1 if new_root is not None else 0)
-        # the pages consumed from free_set are exactly the new node pages
-        consumed = sorted(free_before - free_set)
-        cset = set(consumed)
-        node_pages = [
-            q
-            for s in consumed
-            if s - 1 not in cset
-            for q in range(s, s + BTREE_NODE_BLKS)
-        ]
-
         # ---- update the MDDF ----
         m = bytearray(self.read_sector(mddf))
         struct.pack_into(">H", m, 0xB0, (filecount + 1) & 0xFFFF)  # filecount += 1
-        struct.pack_into(
-            ">I", m, 0xBA, freecount - needed_pages - len(node_pages)
-        )  # freecount -= used
+        new_freecount = max(0, freecount - needed_pages - len(node_pages))
+        struct.pack_into(">I", m, 0xBA, new_freecount)  # freecount -= used
         struct.pack_into(
             ">H", m, 0x122, (fs_overhead + len(node_pages)) & 0xFFFF
         )  # fs_overhead += node pages
@@ -1196,9 +1234,10 @@ class AddFileMixin:
         # MDDF tree_depth (e.g. left over from an interrupted write), which
         # would otherwise make a later add/delete mix tree levels and corrupt
         # the catalog.
-        if new_depth != self._mddf_u16(0x132):
+        old_mddf_depth = self._mddf_u16(0x132)
+        if actual_depth != old_mddf_depth:
             print(
-                f"WARNING: MDDF tree_depth was {self._mddf_u16(0x132)} but the tree actually has depth {new_depth}; correcting the MDDF."
+                f"WARNING: MDDF tree_depth was {old_mddf_depth} but the tree actually had depth {actual_depth}; correcting the MDDF."
             )
         struct.pack_into(">H", m, 0x132, new_depth)  # tree_depth := measured depth
         self._mem_write_sector_data(mddf, bytes(m))
@@ -1235,7 +1274,8 @@ class AddFileMixin:
         return 0
 
     def add_file(self, host_file_path: str, lisa_name: str) -> int:
-        """Add a host file into this flat-catalog (fs_version 14/15) volume as a new Lisa file.
+        """Add a host file into this volume as a new Lisa file (delegating to
+        _add_file_btree() on fs_version 16/17 b-tree volumes).
 
         This replicates the OS's MAKE_ENTRY + NEW_SFILE + APPENDPAGES + write path
         (see LISA_OS/OS/source-fsprim, -sfileio, -sfileio1 .text.unix.txt):
@@ -2856,10 +2896,11 @@ class DeleteFileMixin(ReplaceFileMixin):
                     0x122,
                     (fs_overhead - BTREE_NODE_BLKS * len(freed_nodes)) & 0xFFFF,
                 )
-            if new_root != self._mddf_u32(0x12E) or new_depth != self._mddf_u16(0x132):
-                if new_depth != self._mddf_u16(0x132):
+            old_mddf_depth = self._mddf_u16(0x132)
+            if new_root != self._mddf_u32(0x12E) or new_depth != old_mddf_depth:
+                if len(path) != old_mddf_depth:
                     print(
-                        f"WARNING: MDDF tree_depth was {self._mddf_u16(0x132)} but the tree actually has depth {new_depth}; correcting the MDDF."
+                        f"WARNING: MDDF tree_depth was {old_mddf_depth} but the tree actually had depth {len(path)}; correcting the MDDF."
                     )
                 struct.pack_into(">I", m, 0x12E, new_root)  # root_page
                 struct.pack_into(">H", m, 0x132, new_depth)  # tree_depth

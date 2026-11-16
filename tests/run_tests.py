@@ -29,11 +29,6 @@ For each image the tests check:
     the corrected DC42 header checksums after 'fix-dc42-checksum', and the
     add/replace/put/delete changes made visible by 'get' and 'list'.
 
-Known limitation of the tools that the tests take into account:
-  * 'add' (and therefore the add path of 'put') is not supported on
-    b-tree-catalog volumes with 12-byte tags (floppy images); for those
-    images the tests expect the documented error (exit code 1).
-
 Usage:
     python3 tests/run_tests.py                 # run all five images
     python3 tests/run_tests.py <image> [...]   # run only the given image(s)
@@ -170,9 +165,7 @@ class ImageInfo:
         m = re.search(r"Computed Tag Checksum:\s+0x[0-9a-f]+ : (OK|BAD!)", info_output)
         self.tag_checksum_ok = bool(m and m.group(1) == "OK")
         self.checksums_ok = self.data_checksum_ok and self.tag_checksum_ok
-        # 'add' (and the add path of 'put') is not supported on b-tree
-        # volumes with 12-byte tags (floppy images):
-        self.add_supported = self.is_flat or self.tag_size == 20
+        self.add_supported = self.tag_size in (12, 20)
 
     def describe(self):
         catalog = "flat catalog" if self.is_flat else "b-tree catalog"
