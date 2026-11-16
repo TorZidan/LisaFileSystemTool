@@ -26,7 +26,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from io import BufferedReader, BytesIO
+from io import BytesIO
 from typing import BinaryIO, List
 import os
 import struct
@@ -34,7 +34,7 @@ import sys
 import tempfile
 
 try:
-    import psutil
+    import psutil  # type: ignore[import-untyped]
 except ImportError:
     psutil = None  # Optional: used only for the "is the disk image open by another process" safety check. To install it, run "pip install psutil".
 
@@ -226,17 +226,16 @@ directly on the host.
 class InMemoryFileSystem:
     """Reads the whole file in memory and provides a _file read-only handler than can read from it as if it was on disk."""
 
-    def __init__(self, file_name):
+    def __init__(self, file_name: str):
         self._file_name = file_name
         self._mddf_sector_number: int = (
             -1
         )  # Populated below once the MDDF sector is found.
-        self._mddf_sector_bytes: bytes = None
         self._fs_version: int = (
             0  # The file system version from the MDDF (14=LOS 1.0, 15=LOS 2.0, 16=LOS 3.0, 17=LOS 3.1).
         )
         self._is_dc42_format: bool = (
-            None  # Either a DC42 formatted image file, or a raw disk image file.
+            False  # Either a DC42 formatted image file, or a raw disk image file.
         )
         self._num_sectors: int = -1
         self._single_tag_size: int = -1
@@ -251,13 +250,14 @@ class InMemoryFileSystem:
                 raise ValueError(
                     f"File is shorter than the minimum allowed {DC42_HEADER_SIZE} bytes! Exiting."
                 )
-            self._file_bytes = file.read()  # Read the whole file
-            if len(self._file_bytes) != self._file_size:
+            raw_file_bytes = file.read()  # Read the whole file
+            if len(raw_file_bytes) != self._file_size:
                 raise ValueError(
                     "File size reported by the OS is different from what we could read! Exiting."
                 )
-            # For convenience, we can access the in-memory file data through this binary file reader:
-            self._file = BytesIO(self._file_bytes)
+            # Access the in-memory file data through a single BytesIO buffer so in-place
+            # mutations stay consistent across all readers (including _file_bytes / _mddf_sector_bytes):
+            self._file = BytesIO(raw_file_bytes)
 
             # Read important fields
             self._file.seek(0x52)
@@ -266,10 +266,14 @@ class InMemoryFileSystem:
             if dc42_magic_number != 0x0100:
                 # A raw ProFile hard disk image file (not DC42). It is generally used only for ProFile hard disk images, not for floppy disk images.
                 self._is_dc42_format = False
-                self._num_sectors = self._file_size // (
-                    512 + 20
-                )  # 512 bytes of data + 20 bytes of tag data per sector
                 self._single_tag_size = 20  # 20 bytes of tag data per sector
+                self._num_sectors = self._file_size // (
+                    SECTOR_SIZE_IN_BYTES + self._single_tag_size
+                )  # 512 bytes of data + 20 bytes of tag data per sector
+                if self._num_sectors <= 0:
+                    raise ValueError(
+                        f"Raw disk image file ({self._file_size} bytes) is too small to hold even a single 532-byte sector! Exiting."
+                    )
                 print(
                     f"Found DC42 magic number = {dc42_magic_number:04X} in the DC42 header at offset 0x52, which most likely means that this is not a DC42 file. Assuming it is a raw disk image format."
                 )
@@ -282,11 +286,9 @@ class InMemoryFileSystem:
                     f"Sector data size: {SECTOR_SIZE_IN_BYTES} (a hard-coded constant in the code)"
                 )
                 print(f"Sector tags size: {self._single_tag_size}")
-                if self._file_size < (
-                    self._num_sectors * (SECTOR_SIZE_IN_BYTES + self._single_tag_size)
-                ):
+                if self._num_sectors % 16 != 0:
                     print(
-                        f"WARNING: Something is wrong: the file size {self._file_size} is less than the reported data+tag size {self._num_sectors*(SECTOR_SIZE_IN_BYTES + self._single_tag_size)} !!!"
+                        f"WARNING: raw image sector count ({self._num_sectors}) is not a multiple of 16; 5:1 interleaving operates on 16-sector groups, so trailing sectors may fall past EOF."
                     )
                 print(
                     f"Extra padding after header,data,tags: {self._file_size-(self._num_sectors*(SECTOR_SIZE_IN_BYTES + self._single_tag_size))} bytes."
@@ -295,17 +297,35 @@ class InMemoryFileSystem:
                 self._is_dc42_format = True
                 self._file.seek(0x40)
                 data_size = struct.unpack(">I", self._file.read(4))[0]
-                self._num_sectors = data_size // 512
+                self._num_sectors = data_size // SECTOR_SIZE_IN_BYTES
+                if self._num_sectors <= 0:
+                    raise ValueError(
+                        f"DC42 header reports data_size={data_size} bytes ({self._num_sectors} sectors); expected at least 1 sector. Cannot continue."
+                    )
                 tag_data_size = struct.unpack(">I", self._file.read(4))[0]
                 if tag_data_size == 0:
                     raise ValueError(
-                        f"WARNING: the tags data size is 0, which means that there are no tags. Can not continue."
+                        "WARNING: the tags data size is 0, which means that there are no tags. Can not continue."
                     )
-                self._single_tag_size = int(tag_data_size / self._num_sectors)
+                self._single_tag_size = tag_data_size // self._num_sectors
+                if self._single_tag_size not in (12, 20):
+                    raise ValueError(
+                        f"Unsupported DC42 tag size {self._single_tag_size} bytes per sector (tag_data_size={tag_data_size}, num_sectors={self._num_sectors}); expected 12 or 20."
+                    )
 
-                # Read disk name (Pascal string, first byte is length)
+                expected_min_size = (
+                    DC42_HEADER_SIZE
+                    + self._num_sectors * SECTOR_SIZE_IN_BYTES
+                    + self._num_sectors * self._single_tag_size
+                )
+                if self._file_size < expected_min_size:
+                    raise ValueError(
+                        f"Truncated DC42 file: file size {self._file_size} bytes is smaller than header ({DC42_HEADER_SIZE}) + data ({self._num_sectors * SECTOR_SIZE_IN_BYTES}) + tags ({self._num_sectors * self._single_tag_size}) = {expected_min_size} bytes."
+                    )
+
+                # Read disk name (64-byte Pascal string field at offset 0x00..0x3F: 1 length byte + up to 63 chars)
                 self._file.seek(0)
-                disk_name = pascal_to_string(self._file.read(0x40 - 1))
+                disk_name = pascal_to_string(self._file.read(0x40))
                 # Here is another way to get the data checksum on Linux: dd if=BLU090.dc42 bs=1 skip=72 count=4 status=none | xxd -p
                 # Here is how to calculate the md5 on the data-only: hexdump -v -e '"%X"' -s 84 -n 871424 Xenix1of5.dc42 | md5   (the value 871424 is good only for Twiggy dc43 images)
                 self._file.seek(0x48)
@@ -345,14 +365,6 @@ class InMemoryFileSystem:
                 print(
                     f"Sector tags size: {self._single_tag_size} : {tag_size_str} : {'OK' if tag_size_str!='UNKNOWN!' else 'BAD!'}"
                 )
-                if self._file_size < (
-                    DC42_HEADER_SIZE
-                    + self._num_sectors * SECTOR_SIZE_IN_BYTES
-                    + self._num_sectors * self._single_tag_size
-                ):
-                    print(
-                        f"WARNING: Something is wrong: the file size {self._file_size} is less than the reported header size {DC42_HEADER_SIZE} + data size {self._num_sectors* SECTOR_SIZE_IN_BYTES} + tag size {self._num_sectors*self._single_tag_size}  which totals to {DC42_HEADER_SIZE + self._num_sectors*SECTOR_SIZE_IN_BYTES + self._num_sectors*self._single_tag_size} bytes"
-                    )
                 print(
                     f"DC42 Header Size: {DC42_HEADER_SIZE:2} (a hard-coded constant in the code)"
                 )
@@ -364,7 +376,7 @@ class InMemoryFileSystem:
                     f"Tag Size:  {(self._single_tag_size*self._num_sectors):7} bytes = {self._num_sectors:4} sectors of  {self._single_tag_size} bytes each {'OK' if self._num_sectors in({0, 800,1600,1702,9728,19456}) else 'UNUSUAL!'}"
                 )
                 print(
-                    f"Extra padding after header,data,tags: {self._file_size-(DC42_HEADER_SIZE + self._num_sectors* SECTOR_SIZE_IN_BYTES + self._single_tag_size*self._num_sectors)} bytes."
+                    f"Extra padding after header,data,tags: {self._file_size - expected_min_size} bytes."
                 )
                 print(f"Data Checksum in header: {data_checksum:#010x}")
                 print(
@@ -412,8 +424,6 @@ class InMemoryFileSystem:
                     "Could not find the MDDF (Media Descriptor Data File) sector. Cannot continue, exiting!"
                 )
 
-            self._mddf_sector_bytes = self.read_sector(self._mddf_sector_number)
-
             self._fs_version = to_uint16_big_endian(self._mddf_sector_bytes, 0)
             print(
                 f"\nFile system version (found in in MDDF sector {self._mddf_sector_number}) is {self._fs_version} (aka {file_system_version_to_string(self._fs_version)})"
@@ -424,10 +434,41 @@ class InMemoryFileSystem:
                     " This program does not work with this version. Cannot continue, exiting!"
                 )
 
+    @property
+    def _file_bytes(self) -> memoryview:
+        """Zero-copy view over the current in-memory image buffer (self._file)."""
+        return self._file.getbuffer()
+
+    @property
+    def _mddf_sector_bytes(self) -> bytes:
+        """Current 512-byte MDDF sector from the in-memory image buffer (self._file)."""
+        return self.read_sector(self._mddf_sector_number)
+
+    def _sector_data_file_offset(self, sector_number: int) -> int:
+        """Byte offset of the 512-byte data of the given sector in the image file."""
+        if self._is_dc42_format:
+            return DC42_HEADER_SIZE + sector_number * SECTOR_SIZE_IN_BYTES
+        return (
+            interleave5(sector_number) * (SECTOR_SIZE_IN_BYTES + self._single_tag_size)
+            + self._single_tag_size
+        )
+
+    def _sector_tag_file_offset(self, sector_number: int) -> int:
+        """Byte offset of the tag of the given sector in the image file."""
+        if self._is_dc42_format:
+            return (
+                DC42_HEADER_SIZE
+                + self._num_sectors * SECTOR_SIZE_IN_BYTES
+                + sector_number * self._single_tag_size
+            )
+        return interleave5(sector_number) * (
+            SECTOR_SIZE_IN_BYTES + self._single_tag_size
+        )
+
     def _is_disk_image_file_currently_open_by_some_other_process(self) -> bool:
         """
         Check if the disk image file (self._file_name) is currently open by any
-        running process.
+        other running process.
 
         Requires the optional 'psutil' library; if it is not installed, the check
         is skipped (a note is printed once) and False is returned.
@@ -439,7 +480,7 @@ class InMemoryFileSystem:
             certain processes.
 
         Returns:
-            True if the file is open by at least one process, False otherwise.
+            True if the file is open by at least one other process, False otherwise.
 
         """
         global _PSUTIL_MISSING_WARNING_SHOWN
@@ -452,11 +493,14 @@ class InMemoryFileSystem:
                 )
                 _PSUTIL_MISSING_WARNING_SHOWN = True
             return False
-        target_path = os.path.abspath(self._file_name)
+        current_pid = os.getpid()
+        target_path = os.path.realpath(self._file_name)
         for proc in psutil.process_iter(["pid", "name"]):
+            if proc.pid == current_pid:
+                continue
             try:
                 for f in proc.open_files():
-                    if os.path.abspath(f.path) == target_path:
+                    if os.path.realpath(f.path) == target_path:
                         return True
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
@@ -589,17 +633,9 @@ class InMemoryFileSystem:
             return
         with file_in_rw_mode:
             for hint_sector_number in protected_file_hint_sector_numbers:
-                if self._is_dc42_format:
-                    sector_start_file_offset: int = (
-                        DC42_HEADER_SIZE + hint_sector_number * SECTOR_SIZE_IN_BYTES
-                    )
-                else:
-                    # The raw image file format is: a set of sectors, where each sector has 20-bytes tag data followed by 512 bytes sector data.
-                    sector_start_file_offset: int = (
-                        interleave5(hint_sector_number)
-                        * (SECTOR_SIZE_IN_BYTES + self._single_tag_size)
-                        + self._single_tag_size
-                    )
+                sector_start_file_offset = self._sector_data_file_offset(
+                    hint_sector_number
+                )
 
                 machine_id_offset = (
                     sector_start_file_offset + 0x42
@@ -649,18 +685,9 @@ class InMemoryFileSystem:
                     new_tag_checksum = self.calculate_new_tag_checksum(
                         hint_sector_number
                     )
-                    if self._is_dc42_format:
-                        tag_checksum_offset = (
-                            DC42_HEADER_SIZE
-                            + self._num_sectors * SECTOR_SIZE_IN_BYTES
-                            + hint_sector_number * self._single_tag_size
-                            + 11
-                        )
-                    else:
-                        # Raw image format: the tag immediately precedes its sector's data.
-                        tag_checksum_offset = (
-                            sector_start_file_offset - self._single_tag_size + 11
-                        )
+                    tag_checksum_offset = (
+                        self._sector_tag_file_offset(hint_sector_number) + 11
+                    )
                     file_in_rw_mode.seek(tag_checksum_offset)
                     file_in_rw_mode.write(bytes([new_tag_checksum]))
                     self._file.seek(tag_checksum_offset)
@@ -677,7 +704,7 @@ class InMemoryFileSystem:
                         )
                 else:
                     print(
-                        f"  (12-byte floppy tags have no per-sector checksum; no tag update needed.)"
+                        "  (12-byte floppy tags have no per-sector checksum; no tag update needed.)"
                     )
 
         # Update the Data and Tags DC42 checksum values in the DC42 header (if this is a DC42 disk image file):
@@ -703,22 +730,8 @@ class InMemoryFileSystem:
         print("Scanning all sectors for invalid per-sector tag checksums ...")
         bad_sectors: list[int] = []
         for sector_number in range(self._num_sectors):
-            if self._is_dc42_format:
-                data_pos = DC42_HEADER_SIZE + sector_number * SECTOR_SIZE_IN_BYTES
-                tag_pos = (
-                    DC42_HEADER_SIZE
-                    + self._num_sectors * SECTOR_SIZE_IN_BYTES
-                    + sector_number * self._single_tag_size
-                )
-            else:
-                tag_pos = interleave5(sector_number) * (
-                    SECTOR_SIZE_IN_BYTES + self._single_tag_size
-                )
-                data_pos = tag_pos + self._single_tag_size
-            self._file.seek(data_pos)
-            data_bytes = self._file.read(SECTOR_SIZE_IN_BYTES)
-            self._file.seek(tag_pos)
-            tag_bytes = self._file.read(self._single_tag_size)
+            data_bytes = self.read_sector(sector_number)
+            tag_bytes = self.read_tags_for_sector(sector_number)
             xor_all = 0
             for b in data_bytes:
                 xor_all ^= b
@@ -735,28 +748,8 @@ class InMemoryFileSystem:
             f"Found {len(bad_sectors)} sector(s) with an invalid tag checksum: {bad_sectors}"
         )
         for sector_number in bad_sectors:
-            if self._is_dc42_format:
-                data_pos = DC42_HEADER_SIZE + sector_number * SECTOR_SIZE_IN_BYTES
-                tag_pos = (
-                    DC42_HEADER_SIZE
-                    + self._num_sectors * SECTOR_SIZE_IN_BYTES
-                    + sector_number * self._single_tag_size
-                )
-            else:
-                tag_pos = interleave5(sector_number) * (
-                    SECTOR_SIZE_IN_BYTES + self._single_tag_size
-                )
-                data_pos = tag_pos + self._single_tag_size
-            self._file.seek(data_pos)
-            data_bytes = self._file.read(SECTOR_SIZE_IN_BYTES)
-            self._file.seek(tag_pos)
-            tag_bytes = bytearray(self._file.read(self._single_tag_size))
-            new_ck = 0
-            for i in range(len(tag_bytes)):
-                if i != 11:
-                    new_ck ^= tag_bytes[i]
-            for b in data_bytes:
-                new_ck ^= b
+            tag_bytes = self.read_tags_for_sector(sector_number)
+            new_ck = self.calculate_new_tag_checksum(sector_number)
             print(
                 f"  Sector {sector_number}: stored byte 11 = {tag_bytes[11]:#04x}, correct byte 11 = {new_ck:#04x}"
             )
@@ -773,33 +766,23 @@ class InMemoryFileSystem:
             return
         with file_in_rw_mode:
             for sector_number in bad_sectors:
-                if self._is_dc42_format:
-                    data_pos = DC42_HEADER_SIZE + sector_number * SECTOR_SIZE_IN_BYTES
-                    tag_pos = (
-                        DC42_HEADER_SIZE
-                        + self._num_sectors * SECTOR_SIZE_IN_BYTES
-                        + sector_number * self._single_tag_size
-                    )
-                else:
-                    tag_pos = interleave5(sector_number) * (
-                        SECTOR_SIZE_IN_BYTES + self._single_tag_size
-                    )
-                    data_pos = tag_pos + self._single_tag_size
+                data_pos = self._sector_data_file_offset(sector_number)
+                tag_pos = self._sector_tag_file_offset(sector_number)
                 file_in_rw_mode.seek(data_pos)
                 data_bytes = file_in_rw_mode.read(SECTOR_SIZE_IN_BYTES)
                 file_in_rw_mode.seek(tag_pos)
-                tag_bytes = bytearray(file_in_rw_mode.read(self._single_tag_size))
+                patched_tag = bytearray(file_in_rw_mode.read(self._single_tag_size))
                 new_ck = 0
-                for i in range(len(tag_bytes)):
+                for i in range(len(patched_tag)):
                     if i != 11:
-                        new_ck ^= tag_bytes[i]
+                        new_ck ^= patched_tag[i]
                 for b in data_bytes:
                     new_ck ^= b
-                tag_bytes[11] = new_ck
+                patched_tag[11] = new_ck
                 file_in_rw_mode.seek(tag_pos)
-                file_in_rw_mode.write(bytes(tag_bytes))
+                file_in_rw_mode.write(bytes(patched_tag))
                 self._file.seek(tag_pos)
-                self._file.write(bytes(tag_bytes))
+                self._file.write(bytes(patched_tag))
                 # Verify from disk:
                 file_in_rw_mode.seek(data_pos)
                 d2 = file_in_rw_mode.read(SECTOR_SIZE_IN_BYTES)
@@ -980,17 +963,9 @@ class InMemoryFileSystem:
         volname_field[0] = len(name_bytes)
         volname_field[1 : 1 + len(name_bytes)] = name_bytes
 
-        if self._is_dc42_format:
-            sector_start_file_offset: int = (
-                DC42_HEADER_SIZE + self._mddf_sector_number * SECTOR_SIZE_IN_BYTES
-            )
-        else:
-            # The raw image file format is: a set of sectors, where each sector has 20-bytes tag data followed by 512 bytes sector data.
-            sector_start_file_offset: int = (
-                interleave5(self._mddf_sector_number)
-                * (SECTOR_SIZE_IN_BYTES + self._single_tag_size)
-                + self._single_tag_size
-            )
+        sector_start_file_offset = self._sector_data_file_offset(
+            self._mddf_sector_number
+        )
         volname_file_offset = sector_start_file_offset + 12  # volname at offset 12 in the MDDF sector
 
         print(
@@ -1008,7 +983,7 @@ class InMemoryFileSystem:
             self._file.seek(volname_file_offset)
             self._file.write(bytes(volname_field))
 
-            # Read the field back from disk (self._file is stale) to verify the change:
+            # Read the field back from disk to verify the on-disk write:
             file_in_rw_mode.seek(volname_file_offset)
             volname_readback = file_in_rw_mode.read(34)
             if volname_readback == bytes(volname_field):
@@ -1029,18 +1004,9 @@ class InMemoryFileSystem:
                 new_tag_checksum = self.calculate_new_tag_checksum(
                     self._mddf_sector_number
                 )
-                if self._is_dc42_format:
-                    tag_checksum_offset = (
-                        DC42_HEADER_SIZE
-                        + self._num_sectors * SECTOR_SIZE_IN_BYTES
-                        + self._mddf_sector_number * self._single_tag_size
-                        + 11
-                    )
-                else:
-                    # Raw image format: the tag immediately precedes its sector's data.
-                    tag_checksum_offset = (
-                        sector_start_file_offset - self._single_tag_size + 11
-                    )
+                tag_checksum_offset = (
+                    self._sector_tag_file_offset(self._mddf_sector_number) + 11
+                )
                 file_in_rw_mode.seek(tag_checksum_offset)
                 file_in_rw_mode.write(bytes([new_tag_checksum]))
                 self._file.seek(tag_checksum_offset)
@@ -1335,11 +1301,6 @@ class InMemoryFileSystem:
             end_sector if (end_sector < self._num_sectors) else self._num_sectors
         )
         for i in range(start_sector, safe_end_sector):
-            self._file.seek(
-                DC42_HEADER_SIZE
-                + self._num_sectors * SECTOR_SIZE_IN_BYTES
-                + i * self._single_tag_size
-            )
             tags_bytes = self.read_tags_for_sector(i)
             file_id_type = struct.unpack(">H", tags_bytes[4:6])[0]
             tags_as_hex_string = " ".join(f"{byte:02X}" for byte in tags_bytes)
@@ -1353,27 +1314,7 @@ class InMemoryFileSystem:
             f"Printing info from the MDDF (Media Descriptor Data File) sector {self._mddf_sector_number}:"
         )
         print_fields_in_byte_array(MDDF_FIELD_DEFINITIONS, mddf_sector_data_bytes, 0)
-        # fs_version = to_uint16_big_endian(mddf_sector_data_bytes, 0x00)
-        # print(f"LisaFS: {file_system_version_to_string(fs_version)} ({fs_version:#04x})")
-        # volumn_name_bytes = mddf_sector_data_bytes[0x0C:0x0C + 33]  # Take 33 bytes from index 0x0C
-        # volumn_name = pascal_to_string(volumn_name_bytes)
-        # print(f"Volume name: {volumn_name}")
-        # s_records_start_sector_offset_after_mddf = to_uint32_big_endian(mddf_sector_data_bytes, 0x94)
-        # print(f"S-Records data start sector offset (after the MDDF sector): {s_records_start_sector_offset_after_mddf} ({s_records_start_sector_offset_after_mddf:#010x})")
-        # s_records_start_sector_number = self._mddf_sector_number + s_records_start_sector_offset_after_mddf
-        # print(f"S-Records data start sector: {s_records_start_sector_number} ({s_records_start_sector_number:#010x})")
-
-        # number_of_s_records_per_sector = to_uint16_big_endian(mddf_sector_data_bytes, 0x98) # Usually 36 (36 x 14 bytes per s-record = 504 bytes, which fits well into the available 512 sector bytes)
-        # print(f"number_of_s_entries_per_block: {number_of_s_records_per_sector} ({number_of_s_records_per_sector:#06x})")
-
-        # s_records_sectors_count = to_uint16_big_endian(mddf_sector_data_bytes, 0x9A)
-        # print(f"s_records_sectors_count: {s_records_sectors_count} ({s_records_sectors_count:#06x})")
-
-        # empty_file_start_sector_offset = to_uint16_big_endian(mddf_sector_data_bytes, 0x9e)
-        # print(f"empty_file_start_sector_offset: {empty_file_start_sector_offset} ({empty_file_start_sector_offset:#06x})")
-
-        # read_and_print_bytes_in_hex_and_ascii(file, HEADER_SIZE + self._mddf_sector_number*512, 512)
-        print(f"")
+        print("")
 
     def mddf_volume_note(self) -> str:
         """A one-line summary of the volume-size related fields of the MDDF sector:
@@ -1386,25 +1327,14 @@ class InMemoryFileSystem:
             the number of free pages (sectors) in the volume.
           * filecount, empty_file, maxfiles = the fields at offsets 0xB0, 0x9E and 0xA0.
         """
+        mddf_bytes = self._mddf_sector_bytes
         return (
-            f"Note: MDDF says volsize={to_uint32_big_endian(self._mddf_sector_bytes, 140)}, "
-            f"free={to_uint32_big_endian(self._mddf_sector_bytes, 186)}, "
-            f"filecount={to_uint16_big_endian(self._mddf_sector_bytes, 176)}, "
-            f"empty_file={to_uint16_big_endian(self._mddf_sector_bytes, 158)}, "
-            f"maxfiles={to_uint16_big_endian(self._mddf_sector_bytes, 160)}."
+            f"Note: MDDF says volsize={to_uint32_big_endian(mddf_bytes, 140)}, "
+            f"free={to_uint32_big_endian(mddf_bytes, 186)}, "
+            f"filecount={to_uint16_big_endian(mddf_bytes, 176)}, "
+            f"empty_file={to_uint16_big_endian(mddf_bytes, 158)}, "
+            f"maxfiles={to_uint16_big_endian(mddf_bytes, 160)}."
         )
-
-    def print_allocation_bitmap_sector_info(
-        self, file: BufferedReader, allocation_bitmap_sector_numbers: List[int]
-    ):
-        if len(allocation_bitmap_sector_numbers) == 0:
-            print(f"\nAllocation bitmap sectors could not be found in this file!\n")
-            return
-
-        for allocation_bitmap_sector_sector_number in allocation_bitmap_sector_numbers:
-            print(
-                f"Found allocation bitmap block at sector {allocation_bitmap_sector_sector_number} ; it starts at offset  {(DC42_HEADER_SIZE + allocation_bitmap_sector_sector_number*512):#08x}\n"
-            )
 
     def read_sector(self, sector_number: int) -> bytes:
         """Reads the 512 bytes of sector data for the given sector number (0-based).
@@ -1417,19 +1347,16 @@ class InMemoryFileSystem:
                 f"Sector number {sector_number} is out of bounds, because the file has only {self._num_sectors} sectors!"
             )
 
-        if self._is_dc42_format:
-            position: int = DC42_HEADER_SIZE + sector_number * SECTOR_SIZE_IN_BYTES
-        else:
-            # The raw image file format is: a set of sectors, where each sector has 20-bytes tag data followed by 512 bytes sector data.
-            position: int = (
-                interleave5(sector_number)
-                * (SECTOR_SIZE_IN_BYTES + self._single_tag_size)
-                + self._single_tag_size
-            )
+        position = self._sector_data_file_offset(sector_number)
         self._file.seek(position)
-        return self._file.read(SECTOR_SIZE_IN_BYTES)
+        data = self._file.read(SECTOR_SIZE_IN_BYTES)
+        if len(data) < SECTOR_SIZE_IN_BYTES:
+            raise ValueError(
+                f"Short read for sector {sector_number} at file offset {position:#x} (got {len(data)} of {SECTOR_SIZE_IN_BYTES} bytes); the disk image may be truncated or have an incomplete 16-sector interleave block."
+            )
+        return data
 
-    def read_4_sectors(self, sector_number: int):
+    def read_4_sectors(self, sector_number: int) -> bytes:
         """Useful for reading catalog sectors, which always come in sets of 4 consecutive sectors."""
         result = b""
         for i in range(sector_number, sector_number + 4):
@@ -1437,28 +1364,18 @@ class InMemoryFileSystem:
             result += sector_bytes
         return result
 
-    def read_tags_for_sector(self, sector_number: int):
+    def read_tags_for_sector(self, sector_number: int) -> bytes:
         if sector_number < 0 or sector_number >= self._num_sectors:
             raise ValueError(
                 f"Sector number {sector_number} is out of bounds, because the file has only {self._num_sectors} sectors!"
             )
 
-        if self._is_dc42_format:
-            position: int = (
-                DC42_HEADER_SIZE
-                + self._num_sectors * SECTOR_SIZE_IN_BYTES
-                + sector_number * self._single_tag_size
-            )
-        else:
-            # The raw image file format is: a set of sectors, where each sector has 20-bytes tag data followed by 512 bytes sector data.
-            position: int = interleave5(sector_number) * (
-                SECTOR_SIZE_IN_BYTES + self._single_tag_size
-            )
+        position = self._sector_tag_file_offset(sector_number)
         self._file.seek(position)
         tag_bytes = self._file.read(self._single_tag_size)
         if (
             len(tag_bytes) < self._single_tag_size
-        ):  # Creates a byte array of "FF....FF" for invalid sector numbers.
+        ):  # Creates a byte array of "FF....FF" for trailing sectors beyond EOF.
             padding_needed = self._single_tag_size - len(tag_bytes)
             ff_padding = b"\xff" * padding_needed
             tag_bytes = tag_bytes + ff_padding
@@ -1523,22 +1440,21 @@ class InMemoryFileSystem:
         if rel_sector_number < 0:
             # Sectors preceding the MDDF sector (boot/loader area) are outside the allocation bitmap.
             return False
-        num_bits_in_allocation_bitmap = to_uint32_big_endian(
-            self._mddf_sector_bytes, 0x8C
-        )
+        mddf_bytes = self._mddf_sector_bytes
+        num_bits_in_allocation_bitmap = to_uint32_big_endian(mddf_bytes, 0x8C)
         if rel_sector_number >= num_bits_in_allocation_bitmap:
             print(
                 f"WARNING: relative sector {rel_sector_number} is beyond the allocation bitmap size ({num_bits_in_allocation_bitmap} bits)."
             )
             return False
         first_relative_bitmap_start_sector_number = to_uint32_big_endian(
-            self._mddf_sector_bytes, 0x88
+            mddf_bytes, 0x88
         )  # Stored in the MDDF sector at offset 0x88 (136 decimal); usually set to 1, which means that the first bitmap sector is the one immediately after the MDDF sector
         first_abs_bitmap_start_sector_number = (
             first_relative_bitmap_start_sector_number + self._mddf_sector_number
         )
         num_bitmap_sectors = to_uint16_big_endian(
-            self._mddf_sector_bytes, 0x92
+            mddf_bytes, 0x92
         )  # Stored in the MDDF sector at offset 0x92 (146 decimal);
         relative_bitmap_sector_num = (
             rel_sector_number // 4096
@@ -1560,17 +1476,18 @@ class InMemoryFileSystem:
         return (bitmap_byte & bit_mask) == 0
 
     def dump_free_bitmap_sectors_numbers(self):
+        mddf_bytes = self._mddf_sector_bytes
         num_bits_in_allocation_bitmap = to_uint32_big_endian(
-            self._mddf_sector_bytes, 0x8C
+            mddf_bytes, 0x8C
         )  # Stored in the MDDF sector at offset 0x8C (140 decimal); there is one bit per sector, so it is usually set to the total number of sectors in the volume minus the MDDF sector number.
         first_relative_bitmap_start_sector_number = to_uint32_big_endian(
-            self._mddf_sector_bytes, 0x88
+            mddf_bytes, 0x88
         )  # Stored in the MDDF sector at offset 0x88 (136 decimal); usually set to 1, which means that the first bitmap sector is the one immediately after the MDDF sector
         first_abs_bitmap_start_sector_number = (
             first_relative_bitmap_start_sector_number + self._mddf_sector_number
         )
         num_bitmap_sectors = to_uint16_big_endian(
-            self._mddf_sector_bytes, 0x92
+            mddf_bytes, 0x92
         )  # Stored in the MDDF sector at offset 0x92 (146 decimal);
         print(
             f"\nDumping all free sector numbers from the bitmap sectors (with numbers from {first_abs_bitmap_start_sector_number} to {first_abs_bitmap_start_sector_number + num_bitmap_sectors - 1}) : "
@@ -1631,54 +1548,85 @@ class InMemoryFileSystem:
             bitmap_sector_bytes = self.read_sector(sector)
             print_bytes_in_hex_and_ascii(bitmap_sector_bytes)
 
-    def _dump_destination(self, file_name: str, flatten: bool = False):
+    def _resolve_dump_root(self, output_dir: str | None = None) -> str:
+        output_root = os.path.normpath(
+            output_dir
+            if output_dir is not None
+            else os.path.join(tempfile.gettempdir(), "LisaFileSystemDump")
+        )
+        if os.path.islink(output_root):
+            raise ValueError(
+                f"Refusing to dump into '{output_root}' because it is a symbolic link."
+            )
+        return output_root
+
+    @staticmethod
+    def _has_symlink_within_dump_root(output_root: str, output_filename: str) -> bool:
+        if os.path.islink(output_root):
+            return True
+        rel_path = os.path.relpath(output_filename, output_root)
+        cur = output_root
+        for part in rel_path.split(os.sep):
+            cur = os.path.join(cur, part)
+            if os.path.islink(cur):
+                return True
+        return False
+
+    def _dump_destination(
+        self,
+        file_name: str,
+        flatten: bool = False,
+        output_dir: str | None = None,
+    ) -> str | None:
         """Compute the host file path a Lisa file is dumped to under the dump folder
-        (the system temp directory + '/LisaFileSystemDump'; e.g. /tmp/LisaFileSystemDump
-        on Linux/macOS, C:\\Users\\<user>\\AppData\\Local\\Temp\\LisaFileSystemDump on Windows).
+        (by default the system temp directory + '/LisaFileSystemDump'; e.g.
+        /tmp/LisaFileSystemDump on Linux/macOS,
+        C:\\Users\\<user>\\AppData\\Local\\Temp\\LisaFileSystemDump on Windows).
 
         By default a '/' in the Lisa file name becomes a host folder separator: a
         file named 'apbg/BG1A.TEXT' is written into the apbg/ subfolder of the dump
-        folder. With flatten=True the '/' is replaced with '-' instead ('apbg-BG1A.TEXT'),
-        so every file is written directly into the dump folder itself.
+        folder. With flatten=True path/drive separators ('/', '\\', ':') are replaced
+        with '-' instead ('apbg-BG1A.TEXT'), so every file is written directly into
+        the dump folder itself.
 
         Returns the full output path, or None if the (possibly flattened) name would
-        escape the dump folder (a leading '/' or a '..' component) and must be skipped.
+        escape the dump folder (leading '/', '..', Windows drive/UNC syntax, etc.)
+        and must be skipped.
         """
-        output_root = os.path.join(tempfile.gettempdir(), "LisaFileSystemDump")
-        host_name = file_name.replace("/", "-") if flatten else file_name
+        output_root = self._resolve_dump_root(output_dir)
+        if flatten:
+            host_name = file_name
+            for sep_ch in ("/", "\\", ":"):
+                host_name = host_name.replace(sep_ch, "-")
+            if host_name in ("", ".", ".."):
+                return None
+        else:
+            if "\\" in file_name or (os.name == "nt" and ":" in file_name):
+                return None
+            parts = file_name.split("/")
+            if file_name.startswith("/") or any(p in ("", ".", "..") for p in parts):
+                return None
+            host_name = os.sep.join(parts)
         output_filename = os.path.normpath(os.path.join(output_root, host_name))
-        if not output_filename.startswith(output_root + os.sep):
+        try:
+            if (
+                os.path.commonpath([output_root, output_filename]) != output_root
+                or output_filename == output_root
+            ):
+                return None
+        except ValueError:
             return None
         return output_filename
 
-    def dump_files(self, flatten: bool = False):
+    def _collect_btree_leaf_records(
+        self, verbose: bool = False
+    ) -> list[tuple[int, bytes]] | None:
+        """Descend from the B-tree catalog root to the leftmost leaf node and collect
+        all (entry_number_in_node, record_bytes) tuples across the leaf chain.
+
+        Performs cycle detection and sector/offset bounds checks on both index and leaf
+        nodes. Returns None if descending to a leaf node fails.
         """
-        Dumps all files from the disk image to the host file system, into the dump folder
-        (the system temp directory + '/LisaFileSystemDump'; it creates the folder if not present).
-        By default it preserves the directory structure: HFS B-tree subdirectories and '/'
-        characters in Lisa file names become host subfolders. With flatten=True, '/' is
-        replaced with '-' instead, so all files are dumped into the single dump folder
-        (the 'dump-flatten' command). Does not attempt to rename the files in any other way.
-
-        On flat-catalog volumes (fs_version 14/15), delegates to _dump_files_flat_catalog().
-        On B-tree catalog volumes (fs_version 16/17), walks the B-tree catalog leaf chain to
-        reconstruct HFS directory paths (DIRENTRY parent_id chains) and locate every FILEENTRY
-        (including 0-byte empty files), validates each file's slist entry and hint page, and
-        reads its contents via flat_catalog_read_file_data() (honoring per-sector dataused and
-        tagged-sector recovery). ".TEXT" files are converted to host text via
-        lisa_text_file_to_host_text().
-        """
-        if self.is_flat_catalog_volume():
-            # fs_version 14/15 volumes: there is no B-tree catalog, so use the slist + tag chains instead:
-            self._dump_files_flat_catalog(flatten)
-            return
-
-        output_dir = os.path.join(tempfile.gettempdir(), "LisaFileSystemDump")
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-            print(f"Created directory: {output_dir}")
-
-        # Step 1: descend from the B-tree root to the leftmost leaf node:
         current_page = self.find_catalog_root_page_sector_number()
         descended_to_leaf = False
         visited_descent_pages: set[int] = set()
@@ -1708,6 +1656,10 @@ class InMemoryFileSystem:
                 )
                 break
             child_page = to_uint32_big_endian(node_bytes, first_record_offset)
+            if verbose:
+                print(
+                    f"Catalog node at relative page {current_page} (absolute sector {abs_node_start}) is an index node; descending to leftmost child page {child_page}."
+                )
             if child_page == current_page or child_page == 0xFFFFFFFF:
                 print(
                     "WARNING: index node points at itself (or BAD); stopping the descent."
@@ -1716,12 +1668,9 @@ class InMemoryFileSystem:
             current_page = child_page
 
         if not descended_to_leaf:
-            print("Could not descend to a leaf node; no files dumped.")
-            return
+            return None
 
-        # Step 2: walk the chain of leaf nodes, collecting DIRENTRY and FILEENTRY records:
-        dirs_by_id: dict[int, tuple[int, str]] = {}  # dir_id -> (parent_id, dir_name)
-        file_entries: list[tuple[int, str, int]] = []  # (parent_id, leaf_name, s_file_id)
+        records: list[tuple[int, bytes]] = []
         visited_pages: set[int] = set()
         while current_page not in visited_pages:
             abs_node_start = self._mddf_sector_number + current_page
@@ -1737,11 +1686,20 @@ class InMemoryFileSystem:
             )  # nkeys @ 2036
             next_page = to_uint32_big_endian(node_bytes, (4 * 512) - 6)  # next @ 2042
             node_kind = node_bytes[(4 * 512) - 2]  # kind @ 2046
+
+            if verbose:
+                print(
+                    f"At catalog leaf node at relative page {current_page} "
+                    f"(absolute sector {abs_node_start}) with file_id={self.get_file_id_type_from_tag_data_for_sector(abs_node_start)}, "
+                    f"num_catalog_entries={num_entries}"
+                )
+
             if node_kind != 0:
                 print(
                     f"WARNING: expected a leaf node at relative page {current_page}, but kind={node_kind}. Stopping."
                 )
                 break
+
             max_possible_entries = (2036 // 2) - 1
             if num_entries > max_possible_entries:
                 print(
@@ -1755,35 +1713,81 @@ class InMemoryFileSystem:
                 )
                 record_end = to_uint16_big_endian(
                     node_bytes, (4 * 512) - 14 - (2 * (i + 1))
-                )
+                )  # for the last record this is the 'used' sentinel
                 if (
                     record_start == 0xFFFF
                     or record_end <= record_start
                     or record_end > 2036
                 ):
+                    if verbose:
+                        print(
+                            f"  WARNING: bad offset table entry for record {i+1} (start {record_start:#06x}, end {record_end:#06x}); skipping it."
+                        )
                     continue
-                record_bytes = node_bytes[record_start:record_end]
-                if len(record_bytes) < 38 or record_bytes[0] != 0x24:
-                    continue
-                parent_id = to_uint16_big_endian(record_bytes, 1)
-                name_bytes = record_bytes[3:35]
-                null_index = name_bytes.find(b"\x00")
-                key_name = (
-                    name_bytes[:null_index] if null_index != -1 else name_bytes
-                ).decode("mac-roman", errors="replace")
-                etype = (to_uint16_big_endian(record_bytes, 36) >> 8) & 0xFF
-                if etype == 1 and len(record_bytes) >= 40:  # DIRENTRY
-                    dir_id = to_uint16_big_endian(record_bytes, 38)
-                    dirs_by_id[dir_id] = (parent_id, key_name)
-                elif etype == 3 and len(record_bytes) >= 40:  # FILEENTRY
-                    s_file_id = to_uint16_big_endian(record_bytes, 38)
-                    file_entries.append((parent_id, key_name, s_file_id))
+                records.append((i + 1, node_bytes[record_start:record_end]))
 
             if next_page == 0xFFFFFFFF or next_page == 0 or next_page == current_page:
+                if verbose:
+                    print(
+                        f"Found next_page={next_page:#010x}, which indicates the end of the catalog."
+                    )
                 break
             current_page = next_page
 
-        # Step 3: dump every cataloged file, preserving HFS directory paths:
+        return records
+
+    def dump_files(self, flatten: bool = False, output_dir: str | None = None):
+        """
+        Dumps all files from the disk image to the host file system, into the dump folder
+        (by default the system temp directory + '/LisaFileSystemDump'; creates the folder
+        if not present). By default it preserves the directory structure: HFS B-tree
+        subdirectories and '/' characters in Lisa file names become host subfolders. With
+        flatten=True, path separators are replaced with '-' instead, so all files are dumped
+        into the single dump folder (the 'dump-flatten' command).
+
+        On flat-catalog volumes (fs_version 14/15), delegates to _dump_files_flat_catalog().
+        On B-tree catalog volumes (fs_version 16/17), walks the B-tree catalog leaf chain to
+        reconstruct HFS directory paths (DIRENTRY parent_id chains) and locate every FILEENTRY
+        (including 0-byte empty files), validates each file's slist entry and hint page, and
+        reads its contents via flat_catalog_read_file_data() (honoring per-sector dataused and
+        tagged-sector recovery). ".TEXT" files are converted to host text via
+        lisa_text_file_to_host_text().
+        """
+        if self.is_flat_catalog_volume():
+            # fs_version 14/15 volumes: there is no B-tree catalog, so use the slist + tag chains instead:
+            self._dump_files_flat_catalog(flatten, output_dir=output_dir)
+            return
+
+        resolved_output_dir = self._resolve_dump_root(output_dir)
+        if not os.path.exists(resolved_output_dir):
+            os.makedirs(resolved_output_dir)
+            print(f"Created directory: {resolved_output_dir}")
+
+        leaf_records = self._collect_btree_leaf_records(verbose=False)
+        if leaf_records is None:
+            print("Could not descend to a leaf node; no files dumped.")
+            return
+
+        dirs_by_id: dict[int, tuple[int, str]] = {}  # dir_id -> (parent_id, dir_name)
+        file_entries: list[tuple[int, str, int]] = []  # (parent_id, leaf_name, s_file_id)
+        for _entry_num, record_bytes in leaf_records:
+            if len(record_bytes) < 38 or record_bytes[0] != 0x24:
+                continue
+            parent_id = to_uint16_big_endian(record_bytes, 1)
+            name_bytes = record_bytes[3:35]
+            null_index = name_bytes.find(b"\x00")
+            key_name = (
+                name_bytes[:null_index] if null_index != -1 else name_bytes
+            ).decode("mac-roman", errors="replace")
+            etype = (to_uint16_big_endian(record_bytes, 36) >> 8) & 0xFF
+            if etype == 1 and len(record_bytes) >= 40:  # DIRENTRY
+                dir_id = to_uint16_big_endian(record_bytes, 38)
+                dirs_by_id[dir_id] = (parent_id, key_name)
+            elif etype == 3 and len(record_bytes) >= 40:  # FILEENTRY
+                s_file_id = to_uint16_big_endian(record_bytes, 38)
+                file_entries.append((parent_id, key_name, s_file_id))
+
+        # Dump every cataloged file, preserving HFS directory paths:
         num_files_written = 0
         for parent_id, leaf_name, s_file_id in file_entries:
             if leaf_name == "":
@@ -1846,10 +1850,17 @@ class InMemoryFileSystem:
             if file_name.upper().endswith(".TEXT"):
                 file_data = lisa_text_file_to_host_text(file_data)
 
-            output_filename = self._dump_destination(file_name, flatten)
+            output_filename = self._dump_destination(
+                file_name, flatten, output_dir=resolved_output_dir
+            )
             if output_filename is None:
                 print(
                     f"Skipping file with an unsafe file name {file_name!r}: s_file_id={s_file_id}"
+                )
+                continue
+            if self._has_symlink_within_dump_root(resolved_output_dir, output_filename):
+                print(
+                    f"Skipping file {file_name!r} because target path '{output_filename}' traverses a symbolic link."
                 )
                 continue
             parent_dir = os.path.dirname(output_filename)
@@ -1862,7 +1873,7 @@ class InMemoryFileSystem:
             print(
                 f"Wrote '{file_name}' (s_file_id={s_file_id}, {len(file_data)} bytes) to {output_filename}"
             )
-        print(f"Done: wrote {num_files_written} file(s) to {output_dir}")
+        print(f"Done: wrote {num_files_written} file(s) to {resolved_output_dir}")
 
     def check_bitmap_for_all_file_data(self):
         """ """
@@ -2016,7 +2027,7 @@ class InMemoryFileSystem:
                     filesize = to_uint32_big_endian(table, off + 8)
                     if hintaddr == 0:
                         continue  # unused slist slot
-                    if 0 < hintaddr < 0x7FFFFFFF:
+                    if 0 < hintaddr < 0x7FFFFFFF and 0 <= mddf_sector_number + hintaddr < num_sectors:
                         file_names[s_file_id] = pascal_to_string(
                             self.read_sector(mddf_sector_number + hintaddr), start=0
                         )
@@ -2051,29 +2062,31 @@ class InMemoryFileSystem:
         # ---- Step 4: classify every sector from the file_id in its tag -----------
         if self._is_dc42_format:
             # In DC42 images the tags form one contiguous block right after all the sector data:
-            tag_region = self._file_bytes[
+            tag_slice = self._file_bytes[
                 DC42_HEADER_SIZE
                 + num_sectors * SECTOR_SIZE_IN_BYTES : DC42_HEADER_SIZE
                 + num_sectors * (SECTOR_SIZE_IN_BYTES + tag_size)
             ]
-            tag_region += b"\xff" * (num_sectors * tag_size - len(tag_region))
+            tag_region: bytes | memoryview
+            if len(tag_slice) < num_sectors * tag_size:
+                tag_region = bytes(tag_slice) + b"\xff" * (
+                    num_sectors * tag_size - len(tag_slice)
+                )
+            else:
+                tag_region = tag_slice
             file_ids = [
                 int.from_bytes(tag_region[i * tag_size + 4 : i * tag_size + 6], "big")
                 for i in range(num_sectors)
             ]
         else:
             # In raw images each tag immediately precedes its sector's data, in 5:1 interleave order:
-            file_ids = [
-                int.from_bytes(
-                    self._file_bytes[
-                        interleave5(i) * (SECTOR_SIZE_IN_BYTES + tag_size)
-                        + 4 : interleave5(i) * (SECTOR_SIZE_IN_BYTES + tag_size)
-                        + 6
-                    ],
-                    "big",
+            file_ids = []
+            for i in range(num_sectors):
+                tag_off = self._sector_tag_file_offset(i)
+                fid_slice = self._file_bytes[tag_off + 4 : tag_off + 6]
+                file_ids.append(
+                    int.from_bytes(fid_slice, "big") if len(fid_slice) == 2 else 0xFFFF
                 )
-                for i in range(num_sectors)
-            ]
 
         chars: list[str] = []
         for i in range(num_sectors):
@@ -2178,7 +2191,7 @@ class InMemoryFileSystem:
         #         return sector_number
         # raise "While looking for the root catalog sector: could not find ANY sector whose file_id is 0x0004 (a catalog). Cannot continue, exiting."
 
-    def dump_catalog(self):
+    def dump_catalog(self, verbose: bool = False):
         """
         Dump every entry (files, directories, threads, ...) in the HFS B-tree catalog.
 
@@ -2220,108 +2233,33 @@ class InMemoryFileSystem:
         print(
             f"\nDumping the catalog, which starts at absolute sector number {absolute_catalog_root_page_sector_number} :"
         )
-        print(
-            f"relative_catalog_root_page_sector_number={catalog_root_page_sector_number} has file_id {self.get_file_id_type_from_tag_data_for_sector(absolute_catalog_root_page_sector_number)}"
-        )
-        # print(f"")
-        # self.pretty_print_tags_for_sector(absolute_catalog_root_page_sector_number)
-        # print(f"")
-        # print_bytes_in_hex_and_ascii(self.read_sector(absolute_catalog_root_page_sector_number))
-        # print(f"")
-
-        # Step 1: descend from the root to the leftmost leaf node (only needed if the tree depth > 1)
-        current_page = catalog_root_page_sector_number
-        descended_to_leaf = False
-        visited_descent_pages: set = set()
-        while True:
-            if current_page in visited_descent_pages:
-                print(
-                    f"WARNING: cycle detected while descending the index nodes at relative page {current_page}; stopping."
-                )
-                break
-            visited_descent_pages.add(current_page)
-            node_bytes = self.read_4_sectors(self._mddf_sector_number + current_page)
-            node_kind = node_bytes[(4 * 512) - 2]  # kind @ 2046: 0 = leaf, 1 = index
-            if node_kind == 0:
-                descended_to_leaf = True
-                break  # reached a leaf node
-            # Index node: the first record (at offset-table entry 0, i.e. node offset 0) starts with
-            # the 4-byte MDDF-relative page number of the leftmost child node:
-            first_record_offset = to_uint16_big_endian(node_bytes, (4 * 512) - 14)
-            child_page = to_uint32_big_endian(node_bytes, first_record_offset)
+        if 0 <= absolute_catalog_root_page_sector_number < self._num_sectors:
             print(
-                f"Catalog node at relative page {current_page} (absolute sector {self._mddf_sector_number + current_page}) is an index node; descending to leftmost child page {child_page}."
+                f"relative_catalog_root_page_sector_number={catalog_root_page_sector_number} has file_id {self.get_file_id_type_from_tag_data_for_sector(absolute_catalog_root_page_sector_number)}"
             )
-            if child_page == current_page or child_page == 0xFFFFFFFF:
-                print(
-                    "WARNING: index node points at itself (or BAD); stopping the descent."
-                )
-                break
-            current_page = child_page
-        if not descended_to_leaf:
-            print(f"Could not descend to a leaf node; found no catalog entries.")
+
+        leaf_records = self._collect_btree_leaf_records(verbose=True)
+        if leaf_records is None:
+            print("Could not descend to a leaf node; found no catalog entries.")
             return
 
-        # Step 2: walk the chain of leaf nodes, dumping all records
-        file_rows: list = []  # rows for the file table printed at the end
+        file_rows: list[list[str]] | None = None if verbose else []
         num_files_found = 0
         num_directories_found = 0
         num_threads_found = 0
         num_other_found = 0
-        visited_pages: set = set()
-        while current_page not in visited_pages:
-            visited_pages.add(current_page)
-            node_bytes = self.read_4_sectors(self._mddf_sector_number + current_page)
-            num_entries = to_uint16_big_endian(
-                node_bytes, (4 * 512) - 12
-            )  # nkeys @ 2036
-            next_page = to_uint32_big_endian(node_bytes, (4 * 512) - 6)  # next @ 2042
-            node_kind = node_bytes[(4 * 512) - 2]  # kind @ 2046
-
-            print(
-                f"At catalog leaf node at relative page {current_page} "
-                f"(absolute sector {self._mddf_sector_number + current_page}) with file_id={self.get_file_id_type_from_tag_data_for_sector(self._mddf_sector_number + current_page)}, "
-                f"num_catalog_entries={num_entries}"
+        for entry_number, record_bytes in leaf_records:
+            entry_category = self.print_catalog_record(
+                record_bytes, entry_number, file_rows
             )
-
-            if node_kind != 0:
-                print(
-                    f"WARNING: expected a leaf node at relative page {current_page}, but kind={node_kind}. Stopping."
-                )
-                break
-
-            # Dump the catalog entries found in the current node, using the offset table:
-            for i in range(num_entries):
-                record_start = to_uint16_big_endian(
-                    node_bytes, (4 * 512) - 14 - (2 * i)
-                )
-                record_end = to_uint16_big_endian(
-                    node_bytes, (4 * 512) - 14 - (2 * (i + 1))
-                )  # for the last record this is the 'used' sentinel
-                if record_start == 0xFFFF or record_end <= record_start:
-                    print(
-                        f"  WARNING: bad offset table entry for record {i+1} (start {record_start:#06x}, end {record_end:#06x}); skipping it."
-                    )
-                    continue
-                record_bytes = node_bytes[record_start:record_end]
-                entry_category = self.print_catalog_record(
-                    record_bytes, i + 1, file_rows
-                )
-                if entry_category == "file":
-                    num_files_found += 1
-                elif entry_category == "directory":
-                    num_directories_found += 1
-                elif entry_category == "thread":
-                    num_threads_found += 1
-                else:
-                    num_other_found += 1
-
-            if next_page == 0xFFFFFFFF or next_page == 0 or next_page == current_page:
-                print(
-                    f"Found next_page={next_page:#010x}, which indicates the end of the catalog."
-                )
-                break
-            current_page = next_page
+            if entry_category == "file":
+                num_files_found += 1
+            elif entry_category == "directory":
+                num_directories_found += 1
+            elif entry_category == "thread":
+                num_threads_found += 1
+            else:
+                num_other_found += 1
 
         print(self.mddf_volume_note())
         if file_rows:
@@ -2333,24 +2271,18 @@ class InMemoryFileSystem:
                 print(line)
 
         mddf_filecount = to_uint16_big_endian(self._mddf_sector_bytes, 176)
-        num_entries_found = (
-            num_files_found
-            + num_directories_found
-            + num_threads_found
-            + num_other_found
-        )
-
-        if num_entries_found == (
-            mddf_filecount - 3
-        ):  # The MDDF filecount always has 3 more files than the ones discovered here
+        # On B-tree volumes (fs_version 16/17), s-files 1..4 are the four initial system
+        # s-files (MDDF, allocation bitmap, slist, B-tree catalog), whereas directories
+        # (DIRENTRY) and directory threads (THREADENTRY) do not allocate s-files.
+        if num_files_found == (mddf_filecount - 4):
             print(
                 f"Found {num_files_found} files, {num_directories_found} directories, {num_threads_found} thread entries and {num_other_found} other catalog entries."
-                f" The MDDF says filecount={mddf_filecount} (3 more), which is correct and expected."
+                f" The MDDF says filecount={mddf_filecount} (4 system s-files + {num_files_found} cataloged files), which is correct and expected."
             )
         else:
             print(
-                f"WARNING: found {num_entries_found} catalog entries ({num_files_found} files, {num_directories_found} directories, {num_threads_found} threads, {num_other_found} other) in the B-tree catalog,"
-                f" but based on the filecount in the MDDF we should have found {mddf_filecount} - 3 = {mddf_filecount-3} files!"
+                f"WARNING: found {num_files_found} file(s) ({num_directories_found} directories, {num_threads_found} threads, {num_other_found} other) in the B-tree catalog,"
+                f" but based on the filecount in the MDDF we should have found {mddf_filecount} - 4 = {mddf_filecount - 4} files!"
             )
 
     def find_protected_files(self) -> list[int]:
@@ -2371,117 +2303,58 @@ class InMemoryFileSystem:
         print(
             "\nLooking for protected files (the 'protected' flag, byte 0x48, in each file's hint sector) ..."
         )
-        protected_hint_sector_numbers: list = []
+        protected_hint_sector_numbers: list[int] = []
 
         if self.is_flat_catalog_volume():
             # fs_version 14/15 volumes have no B-tree catalog; scan the slist instead:
             return self._find_protected_files_flat_catalog()
 
-        # Step 1: descend from the root to the leftmost leaf node (only needed if the tree depth > 1),
-        # exactly as in dump_catalog():
-        current_page = self.find_catalog_root_page_sector_number()
-        descended_to_leaf = False
-        visited_descent_pages: set = set()
-        num_files_found = 0
-        while True:
-            if current_page in visited_descent_pages:
-                print(
-                    f"WARNING: cycle detected while descending the index nodes at relative page {current_page}; stopping."
-                )
-                break
-            visited_descent_pages.add(current_page)
-            node_bytes = self.read_4_sectors(self._mddf_sector_number + current_page)
-            node_kind = node_bytes[(4 * 512) - 2]  # kind @ 2046: 0 = leaf, 1 = index
-            if node_kind == 0:
-                descended_to_leaf = True
-                break  # reached a leaf node
-            # Index node: the first record (at offset-table entry 0, i.e. node offset 0) starts with
-            # the 4-byte MDDF-relative page number of the leftmost child node:
-            first_record_offset = to_uint16_big_endian(node_bytes, (4 * 512) - 14)
-            child_page = to_uint32_big_endian(node_bytes, first_record_offset)
-            if child_page == current_page or child_page == 0xFFFFFFFF:
-                print(
-                    "WARNING: index node points at itself (or BAD); stopping the descent."
-                )
-                break
-            current_page = child_page
-        if not descended_to_leaf:
-            print(f"Could not descend to a leaf node; found no files.")
+        leaf_records = self._collect_btree_leaf_records(verbose=False)
+        if leaf_records is None:
+            print("Could not descend to a leaf node; found no files.")
             return protected_hint_sector_numbers
 
-        # Step 2: walk the chain of leaf nodes, checking every file entry:
-        visited_pages: set = set()
-        while current_page not in visited_pages:
-            visited_pages.add(current_page)
-            node_bytes = self.read_4_sectors(self._mddf_sector_number + current_page)
-            num_entries = to_uint16_big_endian(
-                node_bytes, (4 * 512) - 12
-            )  # nkeys @ 2036
-            next_page = to_uint32_big_endian(node_bytes, (4 * 512) - 6)  # next @ 2042
-            node_kind = node_bytes[(4 * 512) - 2]  # kind @ 2046
-            if node_kind != 0:
+        num_files_found = 0
+        for _entry_number, record_bytes in leaf_records:
+            if len(record_bytes) < 40 or record_bytes[0] != 0x24:
+                continue
+            etype = (to_uint16_big_endian(record_bytes, 36) >> 8) & 0xFF
+            if (
+                etype != 3
+            ):  # Only FILEENTRY records have an s_file_id, and thus a hint sector to check:
+                continue
+            num_files_found += 1
+            name_bytes = record_bytes[3:35]
+            null_index = name_bytes.find(b"\x00")
+            key_name = (
+                name_bytes[:null_index] if null_index != -1 else name_bytes
+            ).decode("mac-roman", errors="replace")
+            s_file_id = to_uint16_big_endian(record_bytes, 38)
+            hint_sector_number, _ = self.get_sentry_for_sfile(s_file_id)
+            if hint_sector_number is None:
                 print(
-                    f"WARNING: expected a leaf node at relative page {current_page}, but kind={node_kind}. Stopping."
+                    f"  WARNING: no hint sector found for file '{key_name}' (s_file_id={s_file_id:#06x}); cannot check its 'protected' flag."
                 )
-                break
-
-            # Check the catalog entries found in the current node, using the offset table:
-            for i in range(num_entries):
-                record_start = to_uint16_big_endian(
-                    node_bytes, (4 * 512) - 14 - (2 * i)
+                continue
+            hint_sector_number = self._locate_hint_page_for_sfile(
+                s_file_id, hint_sector_number
+            )
+            if hint_sector_number is None:
+                continue
+            hint_sector_bytes = self.read_sector(hint_sector_number)
+            if (
+                hint_sector_bytes[0x48] != 0
+            ):  # The "protected" flag is set (see print_hint_sector_info()):
+                machine_id = to_uint32_big_endian(
+                    hint_sector_bytes, 0x42
+                )  # 0x42: machine_id (the machine this file may be opened on)
+                # Per LISA_OS/OS/source-SERNUM.TEXT.unix.txt: machine_id = first3 * 65536 + last5, where
+                # first3/last5 are the BCD digits of the 8-digit AppleNet serial number.
+                applenet_id = f" = AppleNet '{machine_id // 65536:03d}{machine_id % 65536:05d}'"
+                print(
+                    f"  - Found protected file named '{key_name}' with machine_id: {machine_id} ({machine_id:#010x}){applenet_id}, s_file_id {s_file_id}, hint_sector_number {hint_sector_number}"
                 )
-                record_end = to_uint16_big_endian(
-                    node_bytes, (4 * 512) - 14 - (2 * (i + 1))
-                )  # for the last record this is the 'used' sentinel
-                if record_start == 0xFFFF or record_end <= record_start:
-                    continue
-                record_bytes = node_bytes[record_start:record_end]
-                if len(record_bytes) < 38 or record_bytes[0] != 0x24:
-                    continue
-                etype = (to_uint16_big_endian(record_bytes, 36) >> 8) & 0xFF
-                if (
-                    etype != 3
-                ):  # Only FILEENTRY records have an s_file_id, and thus a hint sector to check:
-                    continue
-                num_files_found += 1
-                name_bytes = record_bytes[3:35]
-                null_index = name_bytes.find(b"\x00")
-                key_name = (
-                    name_bytes[:null_index] if null_index != -1 else name_bytes
-                ).decode("cp1252", errors="replace")
-                s_file_id = to_uint16_big_endian(record_bytes, 38)
-                hint_sector_number, _ = self.get_sentry_for_sfile(s_file_id)
-                if hint_sector_number is None:
-                    print(
-                        f"  WARNING: no hint sector found for file '{key_name}' (s_file_id={s_file_id:#06x}); cannot check its 'protected' flag."
-                    )
-                    continue
-                hint_sector_number = self._locate_hint_page_for_sfile(
-                    s_file_id, hint_sector_number
-                )
-                if hint_sector_number is None:
-                    continue
-                hint_sector_bytes = self.read_sector(hint_sector_number)
-                if (
-                    hint_sector_bytes[0x48] != 0
-                ):  # The "protected" flag is set (see print_hint_sector_info()):
-                    machine_id = to_uint32_big_endian(
-                        hint_sector_bytes, 0x42
-                    )  # 0x42: machine_id (the machine this file may be opened on)
-                    # Per LISA_OS/OS/source-SERNUM.TEXT.unix.txt: machine_id = first3 * 65536 + last5, where
-                    # first3/last5 are the BCD digits of the 8-digit AppleNet serial number.
-                    applenet_id = f" = AppleNet '{machine_id // 65536:03d}{machine_id % 65536:05d}'"
-                    print(
-                        f"  - Found protected file named '{key_name}' with machine_id: {machine_id} ({machine_id:#010x}){applenet_id}, s_file_id {s_file_id}, hint_sector_number {hint_sector_number}"
-                    )
-                    protected_hint_sector_numbers.append(hint_sector_number)
-
-                # self.pretty_print_tags_for_sector(hint_sector_number)
-                # self.print_hint_sector_info(hint_sector_number)
-
-            if next_page == 0xFFFFFFFF or next_page == 0 or next_page == current_page:
-                break
-            current_page = next_page
+                protected_hint_sector_numbers.append(hint_sector_number)
 
         print(
             f"Found {len(protected_hint_sector_numbers)} protected file(s) out of {num_files_found} total files."
@@ -2579,7 +2452,7 @@ class InMemoryFileSystem:
         name_bytes = record[3:35]
         null_index = name_bytes.find(b"\x00")
         key_name = (name_bytes[:null_index] if null_index != -1 else name_bytes).decode(
-            "cp1252", errors="replace"
+            "mac-roman", errors="replace"
         )
 
         etype_field = to_uint16_big_endian(record, 36)
@@ -2660,7 +2533,7 @@ class InMemoryFileSystem:
         ):  # THREADENTRY, 78 bytes in total: parID @ 38, myName @ 40 (a 34-byte Pascal string)
             par_id = to_uint16_big_endian(record, 38)
             name_len = min(record[40], 33) if len(record) > 41 else 0
-            thread_name = record[41 : 41 + name_len].decode("cp1252", errors="replace")
+            thread_name = record[41 : 41 + name_len].decode("mac-roman", errors="replace")
             print(
                 f"  At catalog entry {entry_number}: thread entry for '{key_name}' (parent_id={parent_id}), thread name='{thread_name}', parID={par_id}"
             )
@@ -2880,7 +2753,7 @@ class InMemoryFileSystem:
                         f"{data_start_sector} (tagged +{data_start_file_id:#06x}, not +{s_file_id:#06x}); "
                         f"recovered {len(tagged)} of {filesize} bytes by reading all sectors tagged +{s_file_id:#06x} in sector-number order."
                     )
-                    out = tagged
+                    return tagged[:filesize]
             elif min(len(out), filesize) < filesize:
                 # The data start sector is correct, but the fwd_link chain broke early:
                 tagged = self._read_file_data_from_tagged_sectors(s_file_id, filesize)
@@ -2889,7 +2762,7 @@ class InMemoryFileSystem:
                         f"  NOTE: the fwd_link chain of s_file_id={s_file_id} broke after {min(len(out), filesize)} of {filesize} bytes; "
                         f"recovered {len(tagged)} bytes by reading all sectors tagged +{s_file_id:#06x} in sector-number order."
                     )
-                    out = tagged
+                    return tagged[:filesize]
         return bytes(out[:filesize])
 
     def _read_file_data_from_tagged_sectors(
@@ -3080,7 +2953,7 @@ class InMemoryFileSystem:
             7: "removed",
             8: "threadentry",
         }
-        counts = {}
+        counts: dict[int, int] = {}
         num_hash_ok = 0
         for slot in range(num_slots):
             rec = data[slot * 54 : slot * 54 + 54]
@@ -3177,22 +3050,24 @@ class InMemoryFileSystem:
         )
         return protected_hint_sector_numbers
 
-    def _dump_files_flat_catalog(self, flatten: bool = False):
+    def _dump_files_flat_catalog(
+        self, flatten: bool = False, output_dir: str | None = None
+    ):
         """fs_version 14/15 variant of dump_files(): write the contents of every file in the
-        slist to the dump folder (the system temp directory + '/LisaFileSystemDump'),
+        slist to the dump folder (by default the system temp directory + '/LisaFileSystemDump'),
         following each file's tag chain (see
         flat_catalog_read_file_data()). The rootcatalog itself is not dumped as a file.
-        By default a '/' in a file name becomes a subfolder; with flatten=True it is
-        replaced with '-' (see dump_files() and _dump_destination()).
+        By default a '/' in a file name becomes a subfolder; with flatten=True path
+        separators are replaced with '-' (see dump_files() and _dump_destination()).
         Like dump_files() above, ".TEXT" files are dumped as plain host text:
         the 1024-byte header page and the null page padding are stripped, and
         the CR line endings are converted to host "\n" (see
         lisa_text_file_to_host_text()).
         """
-        output_dir = os.path.join(tempfile.gettempdir(), "LisaFileSystemDump")
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-            print(f"Created directory: {output_dir}")
+        resolved_output_dir = self._resolve_dump_root(output_dir)
+        if not os.path.exists(resolved_output_dir):
+            os.makedirs(resolved_output_dir)
+            print(f"Created directory: {resolved_output_dir}")
         first_sfile, last_sfile = self._flat_catalog_sfile_range()
         num_files_written = 0
         for s_file_id in range(first_sfile, last_sfile + 1):
@@ -3249,17 +3124,24 @@ class InMemoryFileSystem:
             if file_name.upper().endswith(".TEXT"):
                 file_data = lisa_text_file_to_host_text(file_data)
             # Skip any name that would escape the dump folder (a leading '/' or
-            # '..' components); in flatten mode a '/' in the name becomes a '-'.
-            output_filename = self._dump_destination(file_name, flatten)
+            # '..' components); in flatten mode path separators become '-'.
+            output_filename = self._dump_destination(
+                file_name, flatten, output_dir=resolved_output_dir
+            )
             if output_filename is None:
                 print(
                     f"Skipping file with an unsafe file name {file_name!r}: s_file_id={s_file_id}"
                 )
                 continue
+            if self._has_symlink_within_dump_root(resolved_output_dir, output_filename):
+                print(
+                    f"Skipping file {file_name!r} because target path '{output_filename}' traverses a symbolic link."
+                )
+                continue
             # Ensure the output directory exists (file names containing '/' are
             # saved into matching subfolders).
             parent_dir = os.path.dirname(output_filename)
-            if not os.path.exists(parent_dir):
+            if parent_dir and not os.path.exists(parent_dir):
                 os.makedirs(parent_dir)
                 print(f"Created directory: {parent_dir}")
             with open(output_filename, "wb") as output_file_handler:
@@ -3268,9 +3150,11 @@ class InMemoryFileSystem:
             print(
                 f"Wrote '{file_name}' (s_file_id={s_file_id}, {len(file_data)} bytes) to {output_filename}"
             )
-        print(f"Done: wrote {num_files_written} file(s) to {output_dir}")
+        print(f"Done: wrote {num_files_written} file(s) to {resolved_output_dir}")
 
-    def find_all_sector_numbers_with_given_file_id_type(self, file_id_type: int) -> int:
+    def find_all_sector_numbers_with_given_file_id_type(
+        self, file_id_type: int
+    ) -> list[int]:
         """Scans all tags, looking for one with file id type of e.g. 0x0001 (the MDDF sector type)
 
         Returns a list of zero-based sector numbers where such tags are found.
@@ -3458,10 +3342,10 @@ def lisa_text_file_to_host_text(file_data: bytes) -> bytes:
             out += page.rstrip(b"\x00")
     # Expand the DLE leading-space compression code at the start of each
     # (CR-terminated) line; the code can only occur there:
-    out = b"\r".join(
+    expanded = b"\r".join(
         _expand_dle_leading_spaces(line) for line in bytes(out).split(b"\r")
     )
-    return out.replace(b"\r", b"\n")
+    return expanded.replace(b"\r", b"\n")
 
 
 def compute_dc42_checksum_of_file_data_block(
@@ -3660,82 +3544,14 @@ def derive_mddf_sector_number_from_boot_sector_zero(
     return mddf_sector_number
 
 
-def to_uint32_big_endian(byte_array, offset):
+def to_uint32_big_endian(byte_array: bytes | bytearray | memoryview, offset: int) -> int:
     """Reads 4 bytes at the given offset and converts them to unsigned int."""
     return struct.unpack(">I", byte_array[offset : offset + 4])[0]
 
 
-def three_bytes_to_int_big_endian(byte_array, offset):
-    return int.from_bytes(
-        byte_array[offset : offset + 3], byteorder="big", signed=False
-    )
-
-
-def to_uint16_big_endian(byte_array, offset):
+def to_uint16_big_endian(byte_array: bytes | bytearray | memoryview, offset: int) -> int:
     """Reads 2 bytes at the given offset and converts them to unsigned int."""
     return struct.unpack(">H", byte_array[offset : offset + 2])[0]
-
-
-def to_uint32_little_endian(byte_array, offset):
-    """Reads 4 bytes at the given offset and converts them to unsigned int."""
-    return struct.unpack("<I", byte_array[offset : offset + 4])[0]
-
-
-def read_and_print_bytes_in_hex_and_ascii(
-    file: BinaryIO, offset: int, bytes_to_print: int
-):
-    """
-    Reads exactly bytes_to_print bytes from a BinaryIO object and prints them
-    16 bytes per line, showing both hexadecimal and ASCII representations.
-
-    Args:
-        file: A BinaryIO object (e.g., an opened file in binary mode,
-              or an io.BytesIO object),
-        offset: where to start printing at,
-        bytes_to_print: how many bytes to print
-    """
-    chunk_size = 16
-    file.seek(offset)
-    # Read the specified number of bytes from the file object
-    data = file.read(bytes_to_print)
-
-    # Check if we actually read 512 bytes. If not, print a warning.
-    if len(data) < bytes_to_print:
-        print(f"Warning: Only {len(data)} bytes read, expected {bytes_to_print}.")
-        # Adjust bytes_to_read to the actual number of bytes read for the loop
-        bytes_to_print = len(data)
-        if bytes_to_print == 0:
-            print("No data to display.")
-            return
-
-    print(f"--- Displaying {bytes_to_print} bytes ---")
-
-    # Iterate through the data in chunks of 16 bytes
-    for i in range(0, bytes_to_print, chunk_size):
-        # Get the current 16-byte chunk
-        chunk = data[i : i + chunk_size]
-
-        # --- Hexadecimal representation ---
-        # Convert each byte in the chunk to a two-digit hexadecimal string,
-        # then join them with spaces.
-        hex_representation = " ".join(f"{byte:02x}" for byte in chunk)
-
-        # --- ASCII representation ---
-        ascii_representation = ""
-        for byte_val in chunk:
-            # Check if the byte represents a printable ASCII character
-            if 32 <= byte_val <= 126:  # ASCII printable range
-                ascii_representation += chr(byte_val)
-            else:
-                ascii_representation += (
-                    "."  # Replace non-printable characters with a dot
-                )
-
-        # Print the current line: offset, hexadecimal, and ASCII
-        # The offset is formatted to be 4 hexadecimal digits (e.g., 0000, 0010, etc.)
-        print(f"{i:04x}: {hex_representation:<48} | {ascii_representation}")
-
-    print(f"--- End of data ---")
 
 
 def print_bytes_in_hex_and_ascii(bytes_to_print):
@@ -3856,50 +3672,6 @@ def format_date(date_as_int: int) -> str:
     return formatted_date_string
 
 
-def compare_filenames(a: str, b: str) -> bool:
-    """
-    Compares two strings 'a' and 'b' case-insensitively to determine
-    if 'a' comes lexicographically before 'b'.
-
-    This function mimics the behavior of the provided C function:
-    - It performs a character-by-character comparison after converting
-      characters to uppercase.
-    - If characters are equal up to the length of the shorter string,
-      the shorter string is considered to come first.
-
-    Args:
-        a: The first string.
-        b: The second string.
-
-    Returns:
-        True if string 'a' comes before string 'b' lexicographically
-        (case-insensitively), False otherwise.
-    """
-    # Get the lengths of the strings
-    a_len = len(a)
-    b_len = len(b)
-
-    # Determine the minimum length to iterate up to
-    min_len = min(a_len, b_len)
-
-    # Iterate through the strings up to the minimum length
-    for i in range(min_len):
-        # Convert characters to uppercase for case-insensitive comparison
-        # In Python, you can directly call .upper() on a single character string
-        ac = a[i].upper()
-        bc = b[i].upper()
-
-        # If characters at the current position are different,
-        # their comparison determines the order
-        if ac != bc:
-            return ac < bc
-
-    # If the loop completes, it means the strings are identical
-    # up to the length of the shorter string.
-    # In this case, the shorter string comes lexicographically before the longer one.
-    return a_len < b_len
-
-
 _INTERLIEVED_SECTORS_OFFSET_DELTA = (
     0,
     4,
@@ -3966,13 +3738,63 @@ if __name__ == "__main__":
         "dump",
         "dump-flatten",
         "fix-dc42-checksum",
+        "fix-sector-checksums",
         "rename-volume",
     )
 
-    command = sys.argv[1].strip().lower() if len(sys.argv) > 1 else ""
-    new_volume_name = None
+    def _print_usage() -> None:
+        print("Usage: python LisaFileSystemTool.py <command> <disk image file name> [extra arg]")
+        print("Available commands:")
+        print(
+            "  deserialize           Remove the theft-protection from all protected files found on the disk image."
+        )
+        print(
+            "  info                  Print disk image info (file format, checksums, MDDF sector)."
+        )
+        print("  list                  List the files on the disk image.")
+        print(
+            "  visualize             Print a one-character-per-sector map of the whole volume, 64 sectors per line"
+            " (B=boot, L=loader, M=MDDF, P=bitmap, S=s-record, C=catalog, H=hentry,"
+            " 9..2=data of the 8 largest files, 1=data of all other files, ?=unknown allocated, .=free)."
+        )
+        dump_dir = os.path.join(tempfile.gettempdir(), "LisaFileSystemDump")
+        print(
+            f"  dump [output_dir]     Dump all files from the disk image into folder {dump_dir} (or [output_dir])"
+            " (HFS folders and '/' in Lisa file names become subfolders there)."
+        )
+        print(
+            "  dump-flatten [dir]    Like 'dump', but path separators in Lisa file names are replaced with '-'"
+            f", so all files are dumped into {dump_dir} (or [dir]) with no subfolders."
+        )
+        print(
+            "                        Note: two file names that differ only by '/' vs '-' (e.g. 'a/b.txt'"
+            " and 'a-b.txt') map to the same host file; the one dumped later overwrites the earlier one."
+        )
+        print(
+            "  fix-dc42-checksum     Fix the DC42 header data/tags checksums, but only if they are wrong."
+        )
+        print(
+            "  fix-sector-checksums  Fix any invalid per-sector 20-byte tag checksums (and update DC42 header checksums)."
+        )
+        print(
+            "  rename-volume <name>  Rename the volume: rewrite the 'volname' field (a Pascal string of up to"
+            " 33 characters) at offset 12 of the MDDF sector, and fix up all affected checksums."
+        )
+
+    if len(sys.argv) < 2:
+        _print_usage()
+        sys.exit(1)
+
+    command = sys.argv[1].strip().lower()
+    if command not in available_commands:
+        print(
+            f"ERROR: unknown command '{command}'. Available commands: {', '.join(available_commands)}"
+        )
+        sys.exit(1)
+
+    new_volume_name: str | None = None
+    dump_output_dir: str | None = None
     if command == "rename-volume":
-        # The only command that takes an extra argument: the new volume name.
         if len(sys.argv) != 4:
             print(
                 "Usage: python LisaFileSystemTool.py rename-volume <disk image file name> <new volume name>"
@@ -3980,50 +3802,19 @@ if __name__ == "__main__":
             sys.exit(1)
         file_name = sys.argv[2]
         new_volume_name = sys.argv[3]
-    else:
-        if len(sys.argv) != 3:
-            print("Usage: python LisaFileSystemTool.py <command> <disk image file name>")
-            print("Available commands:")
+    elif command in ("dump", "dump-flatten"):
+        if len(sys.argv) not in (3, 4):
             print(
-                "  deserialize    Remove the theft-protection from all protected files found on the disk image."
-            )
-            print(
-                "  info           Print disk image info (file format, checksums, MDDF sector)."
-            )
-            print("  list           List the files on the disk image.")
-            print(
-                "  visualize      Print a one-character-per-sector map of the whole volume, 64 sectors per line"
-                " (B=boot, L=loader, M=MDDF, P=bitmap, S=s-record, C=catalog, H=hentry,"
-                " 9..2=data of the 8 largest files, 1=data of all other files, ?=unknown allocated, .=free)."
-            )
-            dump_dir = os.path.join(tempfile.gettempdir(), "LisaFileSystemDump")
-            print(
-                f"  dump           Dump all files from the disk image into folder {dump_dir}"
-                " (a '/' in a Lisa file name becomes a subfolder there)."
-            )
-            print(
-                "  dump-flatten   Like 'dump', but a '/' in a Lisa file name is replaced with a '-'"
-                f", so all files are dumped into the {dump_dir} folder (no subfolders are being created)."
-            )
-            print(
-                "                 Note: two file names that differ only by '/' vs '-' (e.g. 'a/b.txt'"
-                " and 'a-b.txt') map to the same host file; the one dumped later overwrites the earlier one."
-            )
-            print(
-                "  fix-dc42-checksum  Fix the DC42 header data/tags checksums, but only if they are wrong."
-            )
-            print(
-                "  rename-volume    Rename the volume: rewrite the 'volname' field (a Pascal string of up to"
-                " 33 characters) at offset 12 of the MDDF sector, and fix up all affected checksums."
+                f"Usage: python LisaFileSystemTool.py {command} <disk image file name> [output folder]"
             )
             sys.exit(1)
         file_name = sys.argv[2]
-
-    if command not in available_commands:
-        print(
-            f"ERROR: unknown command '{command}'. Available commands: {', '.join(available_commands)}"
-        )
-        sys.exit(1)
+        dump_output_dir = sys.argv[3] if len(sys.argv) == 4 else None
+    else:
+        if len(sys.argv) != 3:
+            _print_usage()
+            sys.exit(1)
+        file_name = sys.argv[2]
 
     # The top level is the right place to turn a failed construction (FileNotFoundError,
     # ValueError, ...) into a one-line error message and a non-zero exit status.
@@ -4063,18 +3854,40 @@ if __name__ == "__main__":
     elif command == "visualize":
         file_system.visualize_volume()
     elif command == "dump":
-        file_system.dump_files()
+        try:
+            file_system.dump_files(output_dir=dump_output_dir)
+        except ValueError as e:
+            print(f"ERROR: {e}")
+            sys.exit(1)
     elif command == "dump-flatten":
-        file_system.dump_files(flatten=True)
+        try:
+            file_system.dump_files(flatten=True, output_dir=dump_output_dir)
+        except ValueError as e:
+            print(f"ERROR: {e}")
+            sys.exit(1)
     elif command == "fix-dc42-checksum":
         try:
-            file_system.fix_dc42_checksum()
+            if file_system._confirm_proceed_if_disk_image_is_open_by_other_process():
+                file_system.fix_dc42_checksum()
+            else:
+                print("Aborted by user; the disk image was not modified.")
         except EOFError:
             # No interactive terminal (stdin closed/redirected): don't prompt, just skip the fix.
             print(
                 "No interactive terminal for the confirmation prompt; skipping the DC42 checksum fix."
             )
+    elif command == "fix-sector-checksums":
+        try:
+            if file_system._confirm_proceed_if_disk_image_is_open_by_other_process():
+                file_system.fix_invalid_sector_checksums()
+            else:
+                print("Aborted by user; the disk image was not modified.")
+        except EOFError:
+            print(
+                "No interactive terminal for the confirmation prompt; skipping fix_invalid_sector_checksums()."
+            )
     elif command == "rename-volume":
+        assert new_volume_name is not None
         try:
             if file_system._confirm_proceed_if_disk_image_is_open_by_other_process():
                 file_system.rename_volume(new_volume_name)

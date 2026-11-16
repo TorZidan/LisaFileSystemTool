@@ -54,6 +54,8 @@ that warns before modifying a disk image currently open in another process (such
 
 ```
 python3 LisaFileSystemTool.py <command> <disk image file name>
+python3 LisaFileSystemTool.py dump <disk image file name> [output folder]
+python3 LisaFileSystemTool.py dump-flatten <disk image file name> [output folder]
 python3 LisaFileSystemTool.py rename-volume <disk image file name> <new volume name>
 ```
 
@@ -62,10 +64,11 @@ python3 LisaFileSystemTool.py rename-volume <disk image file name> <new volume n
 | `info`      | Prints useful information about the disk image (format, sector count, disk name, DC42 checksums, disk type/format), then prints the MDDF fields (volume name, version, slist/bitmap/catalog pointers, …) and lists the sector numbers of each predefined sector type (MDDF, bitmap, s-record, catalog, erased, boot, loader). |
 | `list`      | Lists all files on the volume. For file systems of version 16/17 it walks the B-tree catalog (`dump_catalog()`); for file systems of version 14/15 it scans the s-list of the flat-catalog volume (`flat_catalog_list_files()`). |
 | `visualize` | Prints a one-character-per-sector map of the whole volume, 64 sectors per line (`B`=boot, `L`=loader, `M`=MDDF, `P`=bitmap, `S`=slist, `C`=catalog, `H`=hentry, `9`..`2`=data of the 8 largest files, `1`=data of all other files, `?`=unknown allocated, `.`=free). |
-| `dump`      | Writes the contents of every file (including 0-byte empty files) to the host folder **`<temp dir>/LisaFileSystemDump/`** (the system temp directory, e.g. `/tmp` on Linux/macOS or `C:\Users\<user>\AppData\Local\Temp` on Windows; created if missing), preserving HFS B-tree subdirectories (`DIRENTRY` paths) and `/` characters in Lisa file names as host subfolders. The root catalog file itself, empty names, and unsafe paths (`..` or leading `/`) are skipped. Text files (names ending with `.text`, case-insensitive) are dumped as plain host text: the 1024-byte on-disk header page and null page padding are stripped, optional DLE (`0x10`) leading-space codes are expanded to spaces, and `\r` line endings are converted to `\n`. |
-| `dump-flatten` | Like `dump`, but every `/` in the path/name is replaced with `-`, so all files are dumped directly into **`<temp dir>/LisaFileSystemDump/`** (no subfolders). |
+| `dump`      | Writes the contents of every file (including 0-byte empty files) to `[output folder]` if specified, or to **`<temp dir>/LisaFileSystemDump/`** by default (the system temp directory, e.g. `/tmp` on Linux/macOS or `C:\Users\<user>\AppData\Local\Temp` on Windows; created if missing), preserving HFS B-tree subdirectories (`DIRENTRY` paths) and `/` characters in Lisa file names as host subfolders. The root catalog file itself, empty names, and unsafe paths (`..`, `\`, or leading `/`) are skipped. Text files (names ending with `.text`, case-insensitive) are dumped as plain host text: the 1024-byte on-disk header page and null page padding are stripped, optional DLE (`0x10`) leading-space codes are expanded to spaces, and `\r` line endings are converted to `\n`. |
+| `dump-flatten` | Like `dump`, but every `/` (and `\`, `:`) in the path/name is replaced with `-`, so all files are dumped directly into `[output folder]` (or **`<temp dir>/LisaFileSystemDump/`** by default), with no subfolders. |
 | `deserialize` | Finds all theft-protected files (see §5.9), asks for y/N confirmation, then rewrites each file's hint sector (so the file can be opened on any machine), and fixes up all affected checksums. |
 | `fix-dc42-checksum`| For DC42 files: checks if the data and tag checksums are correct in the DC42 header, and fixes the incorrect ones, if any. |
+| `fix-sector-checksums` | For disk images with 20-byte tags (hard disk images): checks the per-sector tag checksum byte across all sectors, asks for y/N confirmation if invalid checksums are found, and rewrites the repaired checksums (plus DC42 header checksums if applicable). |
 | `rename-volume` | Renames the volume: rewrites the `volname` field (a Pascal string of up to 33 characters, Mac Roman) at offset 12 of the MDDF sector (see §4), then fixes up all affected checksums (the per-sector tag checksum for 20-byte tags, and the DC42 header checksums for DC42 files). The new name is given as the third command-line argument and is validated first (non-empty, ≤ 33 characters, no '/', Mac-Roman encodable); a y/N confirmation is asked before anything is written. |
 
 
