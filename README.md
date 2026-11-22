@@ -565,7 +565,7 @@ Both catalog versions (Flat or B-Tree) converge on the same mechanics, driven by
    (`0xFFFFFF` in 20-byte tags, `0x07FF` in 12-byte tags).
 5. `fileaddr = 0` or `filesize = 0` ⇒ the file is empty.
 
-All data pages of file *N* are tagged `+N`, so an alternative way is to find all sectors whose tag carries the file's id, sort them and read them.
+All data pages of file *N* are tagged `+N`, so an alternative way is to find all allocated sectors whose tag carries the file's id, sort them by `rel_num` and read them.
 
 Text files (with file names ending with `.text`, case-insensitive) are handled in a special way: the 1024-byte on-disk header page and the null page padding are stripped, optional DLE (`0x10`) leading-space compression codes are expanded to spaces, and the `\r` new-line symbols used by LOS are converted to `\n`, so no further conversion is needed to view/use the file on the host PC.
 

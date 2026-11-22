@@ -2751,7 +2751,7 @@ class InMemoryFileSystem:
                     print(
                         f"  NOTE: stale slist entry for s_file_id={s_file_id}: its fileaddr points at sector "
                         f"{data_start_sector} (tagged +{data_start_file_id:#06x}, not +{s_file_id:#06x}); "
-                        f"recovered {len(tagged)} of {filesize} bytes by reading all sectors tagged +{s_file_id:#06x} in sector-number order."
+                        f"recovered {len(tagged)} of {filesize} bytes by reading all sectors tagged +{s_file_id:#06x} in rel_num order."
                     )
                     return tagged[:filesize]
             elif min(len(out), filesize) < filesize:
@@ -2760,7 +2760,7 @@ class InMemoryFileSystem:
                 if len(tagged) > len(out):
                     print(
                         f"  NOTE: the fwd_link chain of s_file_id={s_file_id} broke after {min(len(out), filesize)} of {filesize} bytes; "
-                        f"recovered {len(tagged)} bytes by reading all sectors tagged +{s_file_id:#06x} in sector-number order."
+                        f"recovered {len(tagged)} bytes by reading all sectors tagged +{s_file_id:#06x} in rel_num order."
                     )
                     return tagged[:filesize]
         return bytes(out[:filesize])
@@ -2769,19 +2769,58 @@ class InMemoryFileSystem:
         self, s_file_id: int, filesize: int
     ) -> bytes:
         """Read a file's data from every sector whose tag carries this file's file_id (+s_file_id),
-        in ascending sector-number order, truncated to `filesize`.
+        ordered by the tag's `rel_num` (logical page index within the file), truncated to `filesize`.
 
-        Fallback for stale slist entries / broken fwd_link chains, where the normal chain walk
-        (starting at the slist's fileaddr) yields the wrong data: the per-sector file_id in the
-        tag is the most reliable record of which sectors belong to the file. Each sector
-        contributes its `dataused` bytes.
+        Used in all supported file system versions (14..17), as well as in both 12-byte (floppy)
+        and 20-byte (ProFile/hard-disk) sector tags.
+
+        Fallback for stale slist entries / incomplete fwd_link chains (e.g. when Lisa OS extends a
+        file with a discontiguous run at lower sector numbers, updating the file map and the new
+        sectors' `rel_num` tags without rewriting the previous last sector's `fwd_link`).
+
+        Sectors marked allocated in the volume's allocation bitmap are preferred over free sectors,
+        because Lisa OS leaves old `+s_file_id` tags in place when freeing data pages (`FMRELEASE`);
+        unallocated sectors are only used to fill missing `rel_num` slots if the allocated sectors
+        alone do not cover `filesize` (e.g. on a volume with a damaged bitmap).
         """
-        out = bytearray()
+        rel_offset = 12 if self._single_tag_size == 20 else 6
+        bitmap_start_rel = to_uint32_big_endian(self._mddf_sector_bytes, 0x88)
+        num_bitmap_sectors = to_uint16_big_endian(self._mddf_sector_bytes, 0x92)
+        bitmap = bytearray()
+        for i in range(num_bitmap_sectors):
+            bmp_sector = self._mddf_sector_number + bitmap_start_rel + i
+            if 0 <= bmp_sector < self._num_sectors:
+                bitmap += self.read_sector(bmp_sector)
+
+        def is_allocated(abs_sector: int) -> bool:
+            if not bitmap:
+                return True
+            rel = abs_sector - self._mddf_sector_number
+            if rel < 0 or rel >= len(bitmap) * 8:
+                return False
+            return bool(bitmap[rel // 8] & (1 << (rel & 7)))
+
+        allocated_by_rel: dict[int, tuple[int, int]] = {}
+        free_by_rel: dict[int, tuple[int, int]] = {}
         for sector in range(0, self._num_sectors):
             if self.get_file_id_from_tag_data_for_sector(sector) != s_file_id:
                 continue
             tag = self.read_tags_for_sector(sector)
+            rel_num = to_uint16_big_endian(tag, rel_offset)
             dataused, _, _ = self._decode_tag_dataused_and_fwd_link(tag)
+            if is_allocated(sector):
+                allocated_by_rel.setdefault(rel_num, (sector, dataused))
+            else:
+                free_by_rel.setdefault(rel_num, (sector, dataused))
+
+        pages_by_rel = dict(allocated_by_rel)
+        if sum(du for _, du in pages_by_rel.values()) < filesize:
+            for rel_num, entry in free_by_rel.items():
+                pages_by_rel.setdefault(rel_num, entry)
+
+        out = bytearray()
+        for rel_num in sorted(pages_by_rel):
+            sector, dataused = pages_by_rel[rel_num]
             out += self.read_sector(sector)[:dataused]
             if len(out) >= filesize:
                 break

@@ -3046,7 +3046,7 @@ class GetFileMixin(ReplaceFileMixin):
         tag chain from the slist's fileaddr (the same mechanics as the OS
         read path), and if the slist entry is stale or the chain is broken
         it falls back to reading every sector tagged +s_file_id in
-        sector-number order. The result is truncated to the sentry's
+        rel_num order. The result is truncated to the sentry's
         filesize.
 
         ".TEXT" files: when binary is False (the default), same rule as the
