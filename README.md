@@ -109,7 +109,7 @@ If the Lisa file name ends with ".TEXT" (case-insensitive), the code assumes tha
 Text files are stored in a special way on the Lisa file system (see [LisaOsTextFileSpecification.txt](./LisaOsTextFileSpecification.txt)),
 so, unlike binary files, there is some extra work we need to do when reading and writing text files:
 * When **adding/replacing** text files: the host text file is converted to the on-disk Lisa text layout — line endings become `\r`, the text is laid out in 1024-byte "pages" of `\r`-terminated lines (null-padded after the last line) with an all-zero 1024-byte header "page" prepended, and any stray trailing `0xFF` byte from the Computer History Museum Lisa source archive text files is stripped.
-* When **dumping/getting** text files: the inverse conversion (`lisa_text_file_to_host_text()`) strips the 1024-byte header page and per-page null padding, expands the optional DLE (`0x10` + `32 + count`) leading-space compression code emitted by Lisa text editors into literal spaces, and converts `\r` line endings to `\n`.
+* When **dumping/getting** text files (with `dump`, `dump-flatten`, or `get`): the inverse conversion (`lisa_text_file_to_host_text()`) strips the 1024-byte header page and per-page null padding, expands the optional DLE (`0x10` + `32 + count`) leading-space compression code emitted by Lisa text editors into literal spaces, and converts `\r` line endings to `\n`. Use `get-binary` in `LisaFileSystemToolPerFile.py` to download a `.TEXT` file byte-exact without this conversion; since this is a rarely needed feature, `get-binary` is only documented here and nowhere else, with the goal of clearing any confusion whether you should use "get" or "get-binary".
 
 ### 1.4 Accepted input files
 

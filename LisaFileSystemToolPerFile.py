@@ -21,7 +21,7 @@
 # tools (e.g. AnalyzeLisaExecutableFile.py) use it to read files straight from a disk image.         #
 #                                                                                                    #
 # Author: TorZidan                                                                                   #
-# Date: Sept 20, 2026                                                                                #
+# Date: Nov 22, 2026                                                                                #
 # License: Published under the GNU General Public License v3.0.                                      #
 ######################################################################################################
 
@@ -2996,10 +2996,11 @@ class PutFileMixin(DeleteFileMixin):
 
 
 class GetFileMixin(ReplaceFileMixin):
-    """The "get" command: get_file() and read_file_as_bytes().
+    """The "get" and "get-binary" commands: get_file(), get_file_binary(), and
+    read_file_as_bytes().
 
-    get = save a file from the volume to a host file (the inverse of
-    add/replace/put): locate a regular file by name (case-insensitive) with
+    get / get-binary = save a file from the volume to a host file (the inverse
+    of add/replace/put): locate a regular file by name (case-insensitive) with
     the shared read-only locator _locate_named_file(), read its data with
     flat_catalog_read_file_data() (the slist-driven tag-chain walk of the OS
     read path, with the stale-sentry / broken-chain fallback that reads every
@@ -3009,24 +3010,26 @@ class GetFileMixin(ReplaceFileMixin):
     read_file_as_bytes() performs exactly the same locate + read, but
     returns the file's data as a bytes object instead of writing a host
     file, so other tools (e.g. AnalyzeLisaExecutableFile.py) can consume files
-    straight from a disk image. Both share the logic in
+    straight from a disk image. All three share the logic in
     _read_named_file_bytes().
 
-    ".TEXT" files are converted back to plain host text with
-    lisa_text_file_to_host_text() (the inverse of
+    For "get" (binary=False, the default), ".TEXT" files are converted back to
+    plain host text with lisa_text_file_to_host_text() (the inverse of
     build_lisa_text_file_data()), exactly like the "dump" command of
-    LisaFileSystemTool.py.
+    LisaFileSystemTool.py. For "get-binary" (binary=True), the raw on-disk
+    bytes are returned / saved byte-exact without any conversion, even for
+    ".TEXT" files.
 
-    The disk image is only read, never written, so neither method needs the
-    "is the image open by another process" confirmation the modifying
+    The disk image is only read, never written, so none of these methods needs
+    the "is the image open by another process" confirmation the modifying
     commands ask for.
 
-    get_file returns the exit code to use: 0 on success, 3 if no file with
-    that name is on the volume, and 1 on any other failure.
+    get_file and get_file_binary return the exit code to use: 0 on success, 3
+    if no file with that name is on the volume, and 1 on any other failure.
     """
 
     def _read_named_file_bytes(
-        self, lisa_name: str
+        self, lisa_name: str, binary: bool = False
     ) -> Tuple[Optional[bytes], int, int, int]:
         """Locate the file named lisa_name and read its full data. The disk
         image is only read, never written.
@@ -3046,15 +3049,17 @@ class GetFileMixin(ReplaceFileMixin):
         sector-number order. The result is truncated to the sentry's
         filesize.
 
-        ".TEXT" files: same rule as the "dump" command of
-        LisaFileSystemTool.py — if lisa_name ends in ".TEXT"
-        (case-insensitive) the on-disk text layout is converted back to
-        plain host text (header page and null page padding stripped, CR
-        line endings become "\n", DLE leading-space codes expanded).
+        ".TEXT" files: when binary is False (the default), same rule as the
+        "dump" command of LisaFileSystemTool.py — if lisa_name ends in
+        ".TEXT" (case-insensitive) the on-disk text layout is converted back
+        to plain host text (header page and null page padding stripped, CR
+        line endings become "\n", DLE leading-space codes expanded). When
+        binary is True, the raw on-disk bytes are returned byte-exact without
+        conversion.
 
         Returns a 4-tuple (data, sfile, filesize, exit_code):
-          * data: the file's bytes (".TEXT" files already converted back to
-            plain host text), or None on failure;
+          * data: the file's bytes (".TEXT" files converted back to plain host
+            text unless binary=True), or None on failure;
           * sfile: the located s-file number (0 on failure);
           * filesize: the slist's on-disk size of the file (0 on failure);
           * exit_code: 0 on success, 3 if no file with that name is on the
@@ -3128,34 +3133,43 @@ class GetFileMixin(ReplaceFileMixin):
             )
 
         # ---- ".TEXT" files: convert the on-disk layout back to host text ----
-        if lisa_name.upper().endswith(".TEXT"):
+        if not binary and lisa_name.upper().endswith(".TEXT"):
             data = lisa_text_file_to_host_text(data)
         return data, sfile, filesize, 0
 
-    def read_file_as_bytes(self, lisa_name: str) -> Optional[bytes]:
+    def read_file_as_bytes(
+        self, lisa_name: str, binary: bool = False
+    ) -> Optional[bytes]:
         """Read the file named lisa_name from this volume and return its
         complete data as a bytes object.
 
         Same locate/read/".TEXT" rules as get_file (see
-        _read_named_file_bytes()); the disk image is only read, never
-        written. Returns the file's bytes, or None if the file cannot be
-        read (the reason is printed).
+        _read_named_file_bytes()); when binary=True, ".TEXT" files are
+        returned byte-exact without host-text conversion. The disk image is
+        only read, never written. Returns the file's bytes, or None if the
+        file cannot be read (the reason is printed).
         """
-        data, _sfile, _filesize, _exit_code = self._read_named_file_bytes(lisa_name)
+        data, _sfile, _filesize, _exit_code = self._read_named_file_bytes(
+            lisa_name, binary=binary
+        )
         return data
 
-    def get_file(self, lisa_name: str, host_file_path: str) -> int:
+    def get_file(
+        self, lisa_name: str, host_file_path: str, binary: bool = False
+    ) -> int:
         """Save the file named lisa_name from this volume to the host file
         host_file_path, overwriting the host file if it exists.
 
         The file is located and read by _read_named_file_bytes() (the same
-        locate/read/".TEXT" rules as read_file_as_bytes); see that method
-        for details.
+        locate/read/".TEXT" rules as read_file_as_bytes); when binary=True,
+        ".TEXT" files are written byte-exact without host-text conversion.
 
         Returns the exit code to use: 0 on success, 3 if no file with that
         name is on the volume, and 1 on any other failure.
         """
-        data, sfile, filesize, exit_code = self._read_named_file_bytes(lisa_name)
+        data, sfile, filesize, exit_code = self._read_named_file_bytes(
+            lisa_name, binary=binary
+        )
         if exit_code != 0 or data is None:
             return exit_code
         try:
@@ -3170,14 +3184,27 @@ class GetFileMixin(ReplaceFileMixin):
         )
         return 0
 
+    def get_file_binary(self, lisa_name: str, host_file_path: str) -> int:
+        """Save the file named lisa_name from this volume byte-exact to the
+        host file host_file_path, overwriting the host file if it exists.
+
+        Identical to get_file(), except that ".TEXT" files are not converted
+        to host text — the raw on-disk bytes are written verbatim.
+
+        Returns the exit code to use: 0 on success, 3 if no file with that
+        name is on the volume, and 1 on any other failure.
+        """
+        return self.get_file(lisa_name, host_file_path, binary=True)
+
 
 class FileSystemWithPerFileCommands(InMemoryFileSystem, PutFileMixin, GetFileMixin):
     """InMemoryFileSystem plus the add (add_file), replace (replace_file),
-    put (put_file), delete (delete_file) and get (get_file) capabilities.
+    put (put_file), delete (delete_file), get (get_file), and get-binary
+    (get_file_binary) capabilities.
 
     PutFileMixin already extends DeleteFileMixin (which extends
     ReplaceFileMixin, which extends AddFileMixin), and GetFileMixin extends
-    ReplaceFileMixin, so all five commands are available.
+    ReplaceFileMixin, so all six commands are available.
     """
 
     pass
@@ -3187,13 +3214,15 @@ class FileSystemWithPerFileCommands(InMemoryFileSystem, PutFileMixin, GetFileMix
 if __name__ == "__main__":
     command = sys.argv[1].strip().lower() if len(sys.argv) >= 2 else ""
 
-    if command not in ("add", "replace", "put", "delete", "get"):
+    if command not in ("add", "replace", "put", "delete", "get", "get-binary"):
         print(
             "Usage: python LisaFileSystemToolPerFile.py <command> <disk image file name> [host file] <lisa file name>"
         )
-        print("       <command> is 'add', 'replace', 'put', 'delete', or 'get'.")
         print(
-            "This tool implements the 'add', 'replace', 'put', 'delete', and 'get' commands; use LisaFileSystemTool.py for the other commands."
+            "       <command> is 'add', 'replace', 'put', 'delete', or 'get'."
+        )
+        print(
+            "This tool implements the 'add', 'replace', 'put', 'delete' and 'get' commands; use LisaFileSystemTool.py for the other commands."
         )
         print(
             "Exit codes: 0 = success; 3 = add: a file with that name already exists (nothing was added) / "
@@ -3211,10 +3240,10 @@ if __name__ == "__main__":
             sys.exit(1)
         disk_image_file_name = sys.argv[2]
         lisa_os_file_name = sys.argv[3]
-    elif command == "get":
+    elif command in ("get", "get-binary"):
         if len(sys.argv) != 5:
             print(
-                "Usage: python LisaFileSystemToolPerFile.py get <disk image file name> <lisa file name> <host file name>"
+                f"Usage: python LisaFileSystemToolPerFile.py {command} <disk image file name> <lisa file name> <host file name>"
             )
             sys.exit(1)
         disk_image_file_name = sys.argv[2]
@@ -3247,12 +3276,12 @@ if __name__ == "__main__":
         )
         sys.exit(1)
 
-    # Every command below, except "get", modifies the disk image on disk, so
-    # first make sure the image file is not currently open by some other
-    # process; if it is, warn the user and only continue if they explicitly
-    # agree. "get" only reads the image (it saves a file from it to the
-    # host), so it does not need the confirmation.
-    if command != "get":
+    # Every command below, except "get" and "get-binary", modifies the disk
+    # image on disk, so first make sure the image file is not currently open
+    # by some other process; if it is, warn the user and only continue if they
+    # explicitly agree. "get" and "get-binary" only read the image (saving a
+    # file from it to the host), so they do not need the confirmation.
+    if command not in ("get", "get-binary"):
         try:
             proceed = (
                 file_system._confirm_proceed_if_disk_image_is_open_by_other_process()
@@ -3270,9 +3299,9 @@ if __name__ == "__main__":
     # Every command method returns the exit code to use directly:
     # 0 = success, 3 = no action was needed (add: a file with that name
     # already exists / replace and delete: no file with that name on the
-    # volume / get: no file with that name on the volume — so callers
-    # re-running an upload list can count "no action needed" separately from
-    # success and from a real failure),
+    # volume / get and get-binary: no file with that name on the volume — so
+    # callers re-running an upload list can count "no action needed"
+    # separately from success and from a real failure),
     # 1 = any other failure. put_file() never returns 3: it always performs
     # the add or the replace, so for it 0 = done, 1 = failure.
     if command == "add":
@@ -3283,6 +3312,8 @@ if __name__ == "__main__":
         sys.exit(file_system.put_file(host_file_name, lisa_os_file_name))
     elif command == "get":
         sys.exit(file_system.get_file(lisa_os_file_name, host_file_name))
+    elif command == "get-binary":
+        sys.exit(file_system.get_file_binary(lisa_os_file_name, host_file_name))
     else:
         sys.exit(file_system.delete_file(lisa_os_file_name))
     # That's all, Folks!
