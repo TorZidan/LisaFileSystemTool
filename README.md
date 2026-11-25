@@ -63,6 +63,7 @@ python3 LisaFileSystemTool.py rename-volume <disk image file name> <new volume n
 |-------------|--------------|
 | `info`      | Prints useful information about the disk image (format, sector count, disk name, DC42 checksums, disk type/format), then prints the MDDF fields (volume name, version, slist/bitmap/catalog pointers, …) and lists the sector numbers of each predefined sector type (MDDF, bitmap, s-record, catalog, erased, boot, loader). |
 | `list`      | Lists all files on the volume. For file systems of version 16/17 it walks the B-tree catalog (`dump_catalog()`); for file systems of version 14/15 it scans the s-list of the flat-catalog volume (`flat_catalog_list_files()`). |
+| `list-los`  | Lists the objects of the Office System desktop: the disks, folders, documents, stationery pads, tools, the Clipboard and the Wastebasket. The Desktop Manager keeps them in the file `{!CATALOG}`, a LIBDB B-tree database of `TcatRec` records (`APDM/CAT.TEXT` in the Office System sources; see §5.10 for this format and the other LIBDB files); the other files of the volume are not visible on the desktop. Each object is shown under its container, with its kind (from `LIBFC/FILERCOMM.TEXT`), object id, tool id, size in blocks, and the created and modified dates. Under each object come the OS files that hold it, which the Desktop Manager names after it (`APDM/GLOBALS.TEXT`): `{T<tool id>}...` for a tool and for Calculator, Clock and Preferences, `{D<object id>T<tool id>}...` for a document or stationery pad, `{F<object id>}` for a folder. It reads the catalogs of LOS 1.0 (database version 0) through 3.1 (version 1). Exit code `3` if the volume has no `{!CATALOG}` (it is not an Office System volume, e.g. a Workshop-only volume), `1` if `{!CATALOG}` is not a LIBDB database. The disk image is only read, never modified. |
 | `visualize` | Prints a one-character-per-sector map of the whole volume, 64 sectors per line (`B`=boot, `L`=loader, `M`=MDDF, `P`=bitmap, `S`=slist, `C`=catalog, `H`=hentry, `9`..`2`=data of the 8 largest files, `1`=data of all other files, `?`=unknown allocated, `.`=free). |
 | `dump`      | Writes the contents of every file (including 0-byte empty files) to `[output folder]` if specified, or to **`<temp dir>/LisaFileSystemDump/`** by default (the system temp directory, e.g. `/tmp` on Linux/macOS or `C:\Users\<user>\AppData\Local\Temp` on Windows; created if missing), preserving HFS B-tree subdirectories (`DIRENTRY` paths) and `/` characters in Lisa file names as host subfolders. The root catalog file itself, empty names, and unsafe paths (`..`, `\`, or leading `/`) are skipped. Text files (names ending with `.text`, case-insensitive) are dumped as plain host text: the 1024-byte on-disk header page and null page padding are stripped, optional DLE (`0x10`) leading-space codes are expanded to spaces, and `\r` line endings are converted to `\n`. |
 | `dump-flatten` | Like `dump`, but every `/` (and `\`, `:`) in the path/name is replaced with `-`, so all files are dumped directly into `[output folder]` (or **`<temp dir>/LisaFileSystemDump/`** by default), with no subfolders. |
@@ -84,6 +85,7 @@ python3 LisaFileSystemToolPerFile.py replace <disk image file name> <host file n
 python3 LisaFileSystemToolPerFile.py put     <disk image file name> <host file name> <lisa file name>
 python3 LisaFileSystemToolPerFile.py delete  <disk image file name> <lisa file name>
 python3 LisaFileSystemToolPerFile.py get     <disk image file name> <lisa file name> <host file name>
+python3 LisaFileSystemToolPerFile.py get-binary <disk image file name> <lisa file name> <host file name>
 ```
 
 | Command   | What it does |
@@ -93,6 +95,7 @@ python3 LisaFileSystemToolPerFile.py get     <disk image file name> <lisa file n
 | `put`     | A convenient add-or-replace command. |
 | `delete`  | Deletes a regular file (found by name, case-insensitive): the catalog entry is removed, the file's data and hint pages are released to the free pool, and the s-list sentry is emptied, exactly as the OS `kill_sfile`/`Ddelete` paths do. On B-tree volumes the catalog record is removed with the OS b-tree deletion algorithm (including the underflow rebalancing: merge or rotate with the sibling, propagation up to the root, and tree-depth shrink when the root becomes empty); freed catalog nodes are zeroed and their pages returned to the free pool. On flat-catalog volumes the centry is cleared per the OS `KILL_ENTRY` rules (including entries that straddle catalog page boundaries). Directories and other non-file catalog entries are rejected. The MDDF counters (`filecount`, `freecount`, `fs_overhead`, `empty_file`, and — on B-tree volumes — `root_page`/`tree_depth`) are all kept consistent, and every affected sector's tag checksum and the DC42 checksums (if any) are fixed up. If the MDDF `tree_depth` field turns out to be stale (e.g. after an interrupted operation), it is corrected from the actual tree structure and a warning is printed. |
 | `get`     | Saves a regular file (found by name, case-insensitive) from the volume to a host file, overwriting the host file if it exists. Text files (with file names ending with ".text") are saved as plain host text, exactly like the `dump` command. Directories and other non-file catalog entries are rejected, and a name that matches several files in different directories is refused. The disk image is only read, never modified. |
+| `get-binary` | The same as `get`, but writes the file's bytes exactly as they are on the disk, also for ".text" files (with their 1 KB header page). |
 
 Exit codes: `0` = success; `3` = nothing was done (`add`: a file with that name already exists /
 `replace`: no file with that name on the volume / `delete`: no file with that name on the volume /
@@ -711,6 +714,55 @@ The tool's handling:
   
   Every write is read back and verified; a mismatch prints a WARNING.
 
+### 5.10 Office System files in LIBDB database format
+
+LIBDB is the Office System's database library (`LISA_OS/LIBS/LIBDB` in the Office System sources).
+A LIBDB file is a B-tree of variable-length records:
+
+* a 512-byte header page, with the check words `$9999` at offset 0 and `$9797` at offset `0x42`
+  (`leaftype` and `nonleaftype` in `LIBDB/DBDECL1.TEXT`), a version byte at offset 2 (0 in
+  LOS 1.0, 1 in LOS 2.0 and later), the page size (2048), the number of records, fields and key
+  fields, the tree depth and the offset of the root page;
+* then the pages: leaf pages (type `$9999`) hold the records, nonleaf pages (type `$9797`) hold
+  keys and pointers to the pages below. At the end of each page is a 12-byte descriptor (number
+  of records, page type, previous page, next page), with the records' offsets just before it.
+  The leaf pages form a chain in key order.
+
+A search of 241 different disk images (LOS 1.0 to 3.1, Workshop, LisaGuide, application disks)
+for files with the two check words found these files. The `list-los` command (§1.1) reads the
+first one.
+
+| File name | Program | What it holds |
+|-----------|---------|---------------|
+| `{!CATALOG}` (on one image `{!Catalog}`) | Desktop Manager (`APDM/CAT.TEXT`) | The objects of the desktop: one `TcatRec` record per disk, folder, document, stationery pad, tool, Clipboard, Wastebasket, ... (16 fields, 3 key fields: container id, name, object id). On every Office System volume found. Usually one 2048-byte page; one image has a catalog of 43 objects on 3 pages. |
+| `{!CATALOG}$R` | Desktop Manager | A copy of the catalog's schema (the record layout) and no records: a 512-byte header page only. `CreateCat` makes it next to a new catalog. When the catalog cannot be opened, `DBRecover` makes it again and gives it to LIBDB's `FileRecover`, in case the schema in `{!CATALOG}` itself is damaged. The repaired catalog is written as `{!CATALOG}$New` and then renamed to `{!CATALOG}`; if that fails, the Desktop Manager makes a new catalog with an entry "Document xxx" for each `{D<id>T<tool>}` file set it finds. |
+| `{D<id>T5}` | LisaList (tool 5 in LOS 1.x) | A LisaList document: one record per row of the list. The number of fields depends on the list (5 to 21 in the documents found). Found on LOS 1.x images with the LisaList examples. |
+| `{D<id>T5}$D` | LisaList | The document's "differential file" (`DiffSuffix`, `APLL/LMMAT.TEXT`; `diffcreate` in `LIBDB/LMSCAN.TEXT`, which opens it together with the data file): as the name says, a file for the changes made to the data file. 2 fields; empty in all the documents found. |
+| `{D<id>T5}$R` | LisaList | A redundant copy of the document's schema, for recovery (`RedunSuffix`; made with LIBDB's `clonefile`). No records. |
+| `BOOT{!TFCATALOG}` | LisaGuide (`GUIDE_APIM/apim-tcatalog.TEXT`) | The working catalog of the "pseudo-Filer" that runs under LisaTutor: a Desktop Manager catalog of its own (12 fields, the older `TcatRec` of the LisaGuide sources), so that the lessons do not change the real one. Its name is `-<volume>-` + `BOOT` + `{!TFCATALOG}`. Found on the LisaGuide disk (empty) and on LOS 2.0 disk 5 (15 records). |
+| `guide/{!CATALOG}`, `guide/{!CATALOG}$R`, `guide/BOOT{!TFCATALOG}` | | The same files with the name prefix `guide/`, on 8 images of the Office System build disk. |
+
+LisaList documents have other files that are not in LIBDB format: `{D<id>T5}$S` (the
+"suspend" file, `SuspendSuffix`; empty in the documents found), and, by their names in
+`APLL/LMMAT.TEXT`, the temporary files `$D1` and `$D2` and the heap file `$H` (none found).
+
+#### `{!DBBUFFER}`
+
+`{!DBBUFFER}` is not a LIBDB file, but it belongs to the catalog. It is the disk file of the
+shared data segment in which LIBDB keeps its page buffers for the catalog (`dbBufName` in
+`APDM/CAT.TEXT`). The Desktop Manager creates it with `InitPool(err, TRUE, DBLDSN, nDbBuffs,
+dbHeapSize, '{!DBBUFFER}', ds_shared, dbPageSize)`:
+
+* `nDbBuffs` buffers of `dbPageSize` = 2048 bytes: 3 on a Lisa with 512 KB of memory
+  (`halfMegDbBuffs`), 6 with 1 MB (`fullMegDbBuffs`); 50 while the catalog is being recovered
+  (`nRecovBuffs`);
+* and `dbHeapSize` = 3000 bytes of heap for LIBDB.
+
+Its contents are an image of that memory (pages of the catalog that were read or written last,
+and LIBDB's heap), with no format of its own; the OS uses the file to swap the data segment out.
+On the LOS 2.0 and 3.1 test images it is 15360 bytes (6 × 2048 for the buffers, plus 3072: the
+3000-byte heap rounded up to whole 512-byte blocks), on a LOS 1.0 image 14336 bytes.
+
 ---
 
 ## 6. Conventions and small utilities
@@ -770,6 +822,7 @@ The maximum possible date is: 2037-02-06 06:28:15 GMT (i.e. value 0xFFFFFFFF = 4
 | `find_protected_files` / `_find_protected_files_flat_catalog` | List all theft-protected files. |
 | `remove_file_protection` | `deserialize` command: clear `machine_id`/`protected`, fix tag + DC42 checksums. |
 | `fix_dc42_checksum` / `fix_invalid_sector_checksums` | `fix-dc42-checksum` command and per-sector 20-byte tag checksum repair. |
+| `list_los` / `parse_catalog_database` | `list-los` command: read the Desktop Manager's LIBDB catalog `{!CATALOG}` and print the desktop objects as a tree, with the OS files of each (`{T<tool>}`, `{D<id>T<tool>}`, `{F<id>}`). |
 | `rename_volume` | `rename-volume` command: validate the new name, rewrite the 34-byte `volname` Pascal string at MDDF offset 12, fix tag + DC42 checksums. |
 | `is_sector_free_in_bitmap` / `dump_bitmap_sectors` / `dump_free_bitmap_sectors_numbers` / `check_bitmap_for_all_file_data` | Allocation-bitmap inspection and consistency checks. |
 | `derive_mddf_sector_number_from_boot_sector_zero` | Reproduce the boot ROM/loader MDDF derivation (§3). |

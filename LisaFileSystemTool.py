@@ -2958,6 +2958,120 @@ class InMemoryFileSystem:
                 f"WARNING: found {num_files} file(s) in the slist, but based on the filecount in the MDDF we should have found {mddf_filecount} - 3 = {mddf_filecount-3} files!"
             )
 
+    def _all_files(self) -> list[tuple[str, int, int]]:
+        """(name, s_file_id, size in bytes) of every regular file on the
+        volume, sorted by name (case-insensitive): from the B-tree catalog's
+        file entries, or on a flat-catalog volume from the slist and the
+        hint pages (as the 'list' command finds them)."""
+        found: list[tuple[str, int]] = []
+        if not self.is_flat_catalog_volume():
+            for _entry_number, rec in self._collect_btree_leaf_records() or []:
+                if len(rec) >= 40 and rec[0] == 0x24 and rec[36] == 3:  # a fileentry
+                    name = rec[3:35].split(b"\x00", 1)[0].decode("mac-roman", errors="replace")
+                    found.append((name, to_uint16_big_endian(rec, 38)))
+        else:
+            first_sfile, last_sfile = self._flat_catalog_sfile_range()
+            for s_file_id in range(first_sfile, last_sfile + 1):
+                entry = self._slist_entry(s_file_id)
+                if entry is None or entry[0] == 0:
+                    continue
+                hint = self._locate_hint_page_for_sfile(s_file_id, self._mddf_sector_number + entry[0])
+                if hint is not None:
+                    found.append((pascal_to_string(self.read_sector(hint), start=0), s_file_id))
+        result = []
+        for name, s_file_id in found:
+            entry = self._slist_entry(s_file_id)
+            result.append((name, s_file_id, entry[2] if entry else 0))
+        return sorted(result, key=lambda e: e[0].upper())
+
+    def list_los(self) -> int:
+        """The 'list-los' command: list the objects of the Office System
+        desktop (disks, folders, documents, stationery pads, tools, the
+        Clipboard, the Wastebasket, ...) as the Desktop Manager keeps them in
+        the file '{!CATALOG}', as a tree (each object under its container),
+        with kind, object id, tool id, size in blocks, created and modified
+        dates, and the OS files that hold each object. The disk image is only
+        read.
+
+        Returns the exit code to use: 0 on success, 3 if the volume has no
+        '{!CATALOG}' (it is not an Office System volume, e.g. a Workshop-only
+        volume), and 1 on any other failure."""
+        files = self._all_files()
+        matches = [f for f in files if f[0].upper() == CATALOG_FILE_NAME.upper()]
+        if not matches:
+            print("This volume has no Office System desktop catalog (no file {!CATALOG}).")
+            return 3
+        if len(matches) > 1:
+            print(f"ERROR: {len(matches)} files are named {CATALOG_FILE_NAME} on this volume.")
+            return 1
+        _name, s_file_id, size = matches[0]
+        try:
+            data = self.flat_catalog_read_file_data(s_file_id)[:size]
+            db_version, records = parse_catalog_database(data)
+        except (ValueError, RuntimeError) as e:
+            print(f"ERROR: {CATALOG_FILE_NAME} cannot be read: {e}")
+            return 1
+
+        children: dict[int, list] = {}
+        ids = {r.self_id for r in records}
+        for r in records:
+            children.setdefault(r.parent_id, []).append(r)
+        # objects of the desk (parent 0) first, then those whose container is missing
+        roots = list(children.get(0, []))
+        orphans = [r for r in records if r.parent_id != 0 and r.parent_id not in ids]
+
+        rows: list = []  # (depth, record)
+
+        def walk(rec, depth, path):
+            rows.append((depth, rec))
+            if rec.self_id in path:  # a cycle of parent ids: do not follow it
+                return
+            for c in children.get(rec.self_id, []):
+                if c is not rec:
+                    walk(c, depth + 1, path | {rec.self_id})
+
+        for r in roots + orphans:
+            walk(r, 0, frozenset())
+
+        print(
+            f"{CATALOG_FILE_NAME}: the Office System desktop catalog (LIBDB database version "
+            f"{db_version}), {len(records)} object(s)."
+        )
+        print()
+        name_width = max([len("Object")] + [2 * d + len(r.name) for d, r in rows])
+        header = (
+            f"{'Object':<{name_width}}  {'Kind':<12} {'ID':>6} {'Tool':>6} {'Blocks':>6}  "
+            f"{'Created':<16}  {'Modified':<16}"
+        )
+        print(header.rstrip())
+        print("-" * len(header))
+        claimed = set()
+        for depth, r in rows:
+            kind = CATALOG_KINDS.get(r.kind, f"kind {r.kind}")
+            tool = str(r.tool_id) if r.tool_id != CATALOG_NULL_INT4 else ""
+            note = ""
+            if r in orphans:
+                note = f"  (container {r.parent_id} is not in the catalog)"
+            if r.split != CATALOG_NULL_INT2:
+                note += f"  (piece {r.split} of an object split across disks)"
+            print(
+                f"{'  ' * depth + r.name:<{name_width}}  {kind:<12} {r.self_id:>6} {tool:>6} "
+                f"{r.size_blocks:>6}  {format_catalog_date(r.created):<16}  "
+                f"{format_catalog_date(r.modified):<16}{note}".rstrip()
+            )
+            prefix = r.file_prefix()
+            if prefix:
+                for n, _s, s in files:
+                    if n.upper().startswith(prefix.upper()):
+                        claimed.add(n)
+                        print(f"{'  ' * (depth + 1)}  file {n}  ({s} bytes)")
+        print()
+        print(
+            f"{len(claimed)} of the volume's {len(files)} files hold these objects; "
+            "the others are not on the desktop."
+        )
+        return 0
+
     def flat_catalog_dump_catalog(self):
         """Dump the flat (hashed) catalog of this fs_version 14/15 volume: it is the data of
         the rootcatalog file, an array of 54-byte centry records (see the comment above).
@@ -3205,6 +3319,130 @@ class InMemoryFileSystem:
             if this_tag_file_id_type == file_id_type:
                 found_sector_numbers.append(i)
         return found_sector_numbers
+
+
+# ---------------------------------------------------------------------------
+# The Office System Desktop Manager's catalog, '{!CATALOG}' (list-los).
+#
+# The Desktop Manager (the Filer) keeps the objects the user sees on the
+# desktop (disks, folders, documents, stationery pads, tools, the Clipboard,
+# the Wastebasket, ...) in the file '{!CATALOG}': a LIBDB B-tree database
+# (LISA_OS/LIBS/LIBDB, pooler.text) of TcatRec records (APDM/CAT.TEXT). The
+# OS files that hold an object's contents are named after it (APDM/GLOBALS.TEXT,
+# APDM/DOC.TEXT): '{T<tool id>}...' for a tool, '{D<object id>T<tool id>}...'
+# for a document or stationery pad, '{F<object id>}...' for an object
+# without a tool. The other OS files are not on the desktop.
+CATALOG_FILE_NAME = "{!CATALOG}"
+CATALOG_HEADER_SIZE = 512  # the database header page
+CATALOG_LEAF = 0x9999  # page type of a leaf page (also the header's first check word)
+CATALOG_NONLEAF = 0x9797  # page type of a nonleaf page (also the header's second check word, at 0x42)
+CATALOG_PAGEDESC_SIZE = 12  # at the end of a page: nkeys(2) ptype(2) prior(4) next(4)
+CATALOG_NIL = -1
+CATALOG_TCATREC_FIXED_SIZE = 56
+CATALOG_NULL_INT2 = -32768
+CATALOG_NULL_INT4 = -2147483648
+CATALOG_ID_LAST_RESERVED = 100  # idLastReserved: ids 1..100 are the built-in objects
+# ObjectKind (LISA_OS/LIBS/LIBFC/FILERCOMM.TEXT):
+CATALOG_KINDS = {
+    0: "nil", 1: "file", 2: "desk", 3: "folder", 4: "document", 5: "stationery",
+    6: "wastebasket", 7: "printer", 8: "calculator", 9: "tray", 10: "computer",
+    11: "computer 2", 12: "in box 1", 13: "in box 2", 14: "out box 1", 15: "out box 2",
+    16: "folder pad", 17: "clipboard", 19: "clock", 20: "letter", 21: "letter pad",
+    24: "tool", 25: "micro disk", 26: "upper twiggy", 27: "lower twiggy",
+    28: "hard disk", 29: "profile", 30: "priam", 31: "slot", 32: "slot 1",
+    33: "slot 2", 34: "slot 3", 35: "Mac document", 36: "Mac disk",
+}
+# kinds that run a program, whose files are its tool's ('{T<tool id>}...'):
+# toolKind, calcKind, clockKind, computerKind and comp2Kind (Preferences)
+CATALOG_PROGRAM_KINDS = (24, 8, 19, 10, 11)
+
+
+class _CatalogRecord:
+    """One TcatRec of '{!CATALOG}' (APDM/CAT.TEXT): the 56-byte fixed part,
+    then the variable-length name (Vfld nameDesc) and extra data (extraDesc)."""
+
+    def __init__(self, raw: bytes):
+        (
+            self.parent_id, name_size, name_offset, self.self_id, self.kind,
+            self.state, self.view, self.props, _top, _left, _bottom, _right,
+            _closed_v, _closed_h, self.created, self.modified, self.size_blocks,
+            self.tool_id, self.split, _unused2, _extra_size, _extra_offset,
+        ) = struct.unpack_from(">ihhihbbHhhhhhhiiiihihh", raw, 0)
+        self.name = raw[name_offset : name_offset + name_size].decode(
+            "mac-roman", errors="replace"
+        )
+
+    def file_prefix(self) -> str | None:
+        """The name prefix of the OS files that hold this object, or None
+        (APDM/GLOBALS.TEXT: '{T<tool>}' for a tool, '{F<id>}' without a
+        tool, else '{D<id>T<tool>}'). Objects that run a program (tools,
+        Calculator, Clock, Preferences) are shown with their tool's files;
+        the other built-in objects (ids 1..100: disks, Wastebasket,
+        Clipboard, ...) have no files of their own."""
+        if self.kind in CATALOG_PROGRAM_KINDS:
+            return f"{{T{self.tool_id}}}" if self.tool_id > 0 else None
+        if self.self_id <= CATALOG_ID_LAST_RESERVED:
+            return None
+        if self.tool_id <= 0:
+            return f"{{F{self.self_id}}}"
+        return f"{{D{self.self_id}T{self.tool_id}}}"
+
+
+def parse_catalog_database(data: bytes) -> tuple[int, list]:
+    """Parse the LIBDB database '{!CATALOG}': returns (database version,
+    records in key order: parent id, name, object id). Raises ValueError if
+    the data is not such a database."""
+    if len(data) < CATALOG_HEADER_SIZE:
+        raise ValueError(f"the file is only {len(data)} bytes long")
+    check1, db_version = struct.unpack_from(">HB", data, 0)
+    check2 = struct.unpack_from(">H", data, 0x42)[0]
+    if check1 != CATALOG_LEAF or check2 != CATALOG_NONLEAF:
+        raise ValueError("the file is not a LIBDB database (bad check words)")
+    first_page, _last_page, nrecs, page_size = struct.unpack_from(">IIIH", data, 8)
+    depth, root = struct.unpack_from(">Hi", data, 0x20)
+    if page_size < 512 or page_size % 512 or first_page < CATALOG_HEADER_SIZE:
+        raise ValueError(f"unexpected page layout (page size {page_size}, first page at {first_page})")
+
+    def read_page(offset: int):
+        if offset < first_page or offset + page_size > len(data):
+            raise ValueError(f"page offset {offset} is outside the file")
+        page = data[offset : offset + page_size]
+        d = page_size - CATALOG_PAGEDESC_SIZE
+        nkeys, ptype, _prior, next_page = struct.unpack_from(">HHii", page, d)
+        offs = [struct.unpack_from(">H", page, d - 2 - 2 * k)[0] for k in range(nkeys + 1)]
+        return ptype, next_page, [page[offs[i] : offs[i + 1]] for i in range(nkeys)]
+
+    if nrecs == 0 or root == CATALOG_NIL:
+        return db_version, []
+    # down the leftmost branch to the first leaf, then along the leaf chain
+    offset = root
+    for _ in range(max(depth, 1) - 1):
+        ptype, _next, recs = read_page(offset)
+        if ptype != CATALOG_NONLEAF or not recs:
+            raise ValueError(f"page {offset} is not a nonleaf page")
+        offset = struct.unpack_from(">i", recs[0], 0)[0]
+    records, seen = [], set()
+    while offset != CATALOG_NIL:
+        if offset in seen:
+            raise ValueError("the leaf pages form a cycle")
+        seen.add(offset)
+        ptype, offset_next, recs = read_page(offset)
+        if ptype != CATALOG_LEAF:
+            raise ValueError(f"page {offset} is not a leaf page")
+        for raw in recs:
+            if len(raw) < CATALOG_TCATREC_FIXED_SIZE:
+                raise ValueError(f"a record of {len(raw)} bytes is too short")
+            records.append(_CatalogRecord(raw))
+        offset = offset_next
+    return db_version, records
+
+
+def format_catalog_date(seconds: int) -> str:
+    """A date of a catalog record: a Lisa date (see format_date()), or
+    nullInt4 for none."""
+    if seconds == CATALOG_NULL_INT4:
+        return "-"
+    return format_date(seconds & 0xFFFFFFFF)
 
 
 def flat_catalog_hash(name: str, maxindex: int) -> int:
@@ -3779,6 +4017,7 @@ if __name__ == "__main__":
         "fix-dc42-checksum",
         "fix-sector-checksums",
         "rename-volume",
+        "list-los",
     )
 
     def _print_usage() -> None:
@@ -3791,6 +4030,10 @@ if __name__ == "__main__":
             "  info                  Print disk image info (file format, checksums, MDDF sector)."
         )
         print("  list                  List the files on the disk image.")
+        print(
+            "  list-los              List the objects of the Office System desktop (disks, folders, documents,"
+            " tools, ...) as the Desktop Manager keeps them in the file {!CATALOG}, with the files of each."
+        )
         print(
             "  visualize             Print a one-character-per-sector map of the whole volume, 64 sectors per line"
             " (B=boot, L=loader, M=MDDF, P=bitmap, S=s-record, C=catalog, H=hentry,"
@@ -3890,6 +4133,8 @@ if __name__ == "__main__":
             file_system.flat_catalog_list_files()
         else:
             file_system.dump_catalog()
+    elif command == "list-los":
+        sys.exit(file_system.list_los())
     elif command == "visualize":
         file_system.visualize_volume()
     elif command == "dump":

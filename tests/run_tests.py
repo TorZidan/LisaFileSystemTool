@@ -6,7 +6,7 @@ Tests every supported command of both tools against each of the five disk
 image files in this folder:
 
   LisaFileSystemTool.py:
-      deserialize, info, list, visualize, dump, dump-flatten,
+      deserialize, info, list, list-los, visualize, dump, dump-flatten,
       fix-dc42-checksum, rename-volume
   LisaFileSystemToolPerFile.py:
       add, replace, put, delete, get
@@ -642,6 +642,77 @@ def test_perfile(results, image, info, copy, workdir):
 # driver
 # ---------------------------------------------------------------------------
 
+# For list-los: lines each image's desktop catalog must show (the
+# object's name, indented by its depth, then its kind), and an OS file that
+# must be listed under an object.
+CATALOG_EXPECTED = {
+    "floppy-sony400k-LisaDraw3.0.dc42": (7, ["  LisaDraw            tool", "    Getting Started   stationery"], "{D111T4}"),
+    "floppy-twiggy-LisaDraw1.0.dc42": (28, ["    Other Examples     folder", "      Pyramid          stationery"], "{D121T4}"),
+    "profile-LOS1.0.dc42": (7, ["  Calculator     calculator", "Preferences      computer "], "{t12}obj"),
+    "profile-LOS2.0andWorkshop2.0andBasicPlus2.0.dc42": (8, ["  Tools          folder", "    Clock        clock"], "{F101}"),
+    "profile-LOS3.1.image": (7, ["  Clock          clock", "Wastebasket      wastebasket"], "{T13}obj1"),
+}
+
+
+def test_list_los(results, image, info, copy, workdir):
+    before = read_bytes(copy)
+    rc, out = run_tool(TOOL, ["list-los", copy])
+    results.check(image, "list-los: exit code 0", rc == 0, out[-2000:])
+    results.check(image, "list-los: the image is not modified", read_bytes(copy) == before)
+    expected = CATALOG_EXPECTED.get(image)
+    if expected:
+        count, lines, file_name = expected
+        results.check(
+            image,
+            f"list-los: {count} objects",
+            f"), {count} object(s)." in out,
+            out[-2000:],
+        )
+        for line in lines:
+            results.check(
+                image,
+                f"list-los: shows '{line.strip()}' at its place in the tree",
+                any(l.startswith(line) for l in out.splitlines()),
+                out[-2000:],
+            )
+        results.check(
+            image,
+            f"list-los: lists the OS file {file_name}",
+            f" file {file_name}  (" in out,
+            out[-2000:],
+        )
+    # A volume without {!CATALOG} (not an Office System volume): exit code 3
+    ext = os.path.splitext(copy)[1]
+    nocat = os.path.join(workdir, "nocatalog" + ext)
+    shutil.copy2(copy, nocat)
+    rc, out = run_tool(TOOL_PERFILE, ["delete", nocat, "{!CATALOG}"], stdin="y\n")
+    if rc != 0:
+        results.check(image, "list-los: setup (delete {!CATALOG} from a copy)", False, out[-2000:])
+        return
+    rc, out = run_tool(TOOL, ["list-los", nocat])
+    results.check(
+        image,
+        "list-los: exit code 3 without {!CATALOG}",
+        rc == 3 and "no Office System desktop catalog" in out,
+        out[-2000:],
+    )
+    # A {!CATALOG} that is not a LIBDB database: exit code 1, no traceback
+    junk = os.path.join(workdir, "junk-catalog.dat")
+    with open(junk, "wb") as f:
+        f.write(b"NOT A CATALOG " * 200)
+    rc, out = run_tool(TOOL_PERFILE, ["add", nocat, junk, "{!CATALOG}"], stdin="y\n")
+    if rc != 0:
+        results.check(image, "list-los: setup (add a bad {!CATALOG})", False, out[-2000:])
+        return
+    rc, out = run_tool(TOOL, ["list-los", nocat])
+    results.check(
+        image,
+        "list-los: exit code 1 for a bad {!CATALOG}",
+        rc == 1 and "cannot be read" in out and "Traceback" not in out,
+        out[-2000:],
+    )
+
+
 def fresh_copy(workdir, src, name):
     dst = os.path.join(workdir, name)
     shutil.copy2(src, dst)
@@ -680,6 +751,7 @@ def run_image_tests(results, image):
         print("  [LisaFileSystemTool.py]")
         test_info(results, image, info, base_copy)
         test_list(results, image, info, base_copy)
+        test_list_los(results, image, info, base_copy, workdir)
         test_visualize(results, image, info, base_copy)
         test_dump(results, image, info, base_copy)
         test_dump_flatten(results, image, info, base_copy)
