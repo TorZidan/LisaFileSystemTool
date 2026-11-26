@@ -732,10 +732,10 @@ def run_image_tests(results, image):
     shutil.rmtree(workdir, ignore_errors=True)
     os.makedirs(workdir, exist_ok=True)
 
-    print(f"\n====================================================================")
+    print("\n====================================================================")
     print(f"Image: {image}")
     print(f"Working directory (all copies): {workdir}")
-    print(f"====================================================================")
+    print("====================================================================")
 
     failed_before = results.failed
     try:
@@ -798,7 +798,7 @@ def main(argv):
         try:
             run_image_tests(results, image)
         except Exception as e:  # noqa: BLE001 - keep going after a crash
-            results.check(image, f"unhandled exception in the tests for this image",
+            results.check(image, "unhandled exception in the tests for this image",
                           False, f"{type(e).__name__}: {e}")
 
     # If every image's working directory has already been cleaned up, remove
@@ -811,7 +811,7 @@ def main(argv):
           f"out of {results.passed + results.failed} checks")
     if results.failures:
         print("\nFailed checks:")
-        for image, name, detail in results.failures:
+        for image, name, _detail in results.failures:
             print(f"  - {image} / {name}")
         return 1
     print("All tests passed.")

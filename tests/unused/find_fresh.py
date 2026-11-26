@@ -45,7 +45,7 @@ for s in range(1, empty_file):
     h = sec_data(hs)
     name = h[1:1+h[0]]
     try: name = name.decode('mac-roman')
-    except: name = repr(name)
+    except Exception: name = repr(name)
     mid = int.from_bytes(h[0x42:0x46],'big')
     prot = h[0x48]
     if prot != 0 or mid != 0:

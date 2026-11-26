@@ -1,4 +1,3 @@
-import struct
 IMG = "/tmp/50MB_blank.image"
 def interleave5(sector):
     d = (0, 4, 8, 12, 0, 4, 8, -4, 0, 4, -8, -4, 0, -12, -8, -4)

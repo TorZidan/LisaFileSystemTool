@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, struct, sys
+import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from LisaFileSystemTool import InMemoryFileSystem
 

@@ -22,7 +22,7 @@ for s in range(1, max(empty_file, filecount)+1):
     h = sec_data(mddf + hintaddr)
     name = h[1:1+h[0]]
     try: name = name.decode('mac-roman')
-    except: name = repr(name)
+    except Exception: name = repr(name)
     mid = int.from_bytes(h[0x42:0x46],'big')
     prot = h[0x48]
     print(f"sfile {s:4d}: '{name}' hint={mddf+hintaddr} mid={mid:#010x} prot={prot}")

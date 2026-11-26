@@ -1,4 +1,3 @@
-import struct
 def load(p): return open(p,'rb').read()
 a = load("/tmp/LOS1AndWorkshop-test-backup.image")
 b = load("/tmp/50MB_blank.image")

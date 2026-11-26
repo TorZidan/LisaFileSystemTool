@@ -1,4 +1,3 @@
-import struct
 def interleave5(sector):
     d = (0, 4, 8, 12, 0, 4, 8, -4, 0, 4, -8, -4, 0, -12, -8, -4)
     return sector + d[sector & 15]

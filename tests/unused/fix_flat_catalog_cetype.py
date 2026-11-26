@@ -31,7 +31,6 @@ Fix (per disk):
 Only the 12 rootcatalog sectors (35..46) are modified.
 """
 import struct
-import sys
 
 SECTOR = 512
 HDR = 84

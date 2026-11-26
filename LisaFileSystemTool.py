@@ -27,7 +27,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
-from typing import BinaryIO, List
+from collections.abc import Sequence
+from typing import Any, BinaryIO, List
 import os
 import struct
 import sys
@@ -226,7 +227,7 @@ directly on the host.
 class InMemoryFileSystem:
     """Reads the whole file in memory and provides a _file read-only handler than can read from it as if it was on disk."""
 
-    def __init__(self, file_name: str):
+    def __init__(self, file_name: str) -> None:
         self._file_name = file_name
         self._mddf_sector_number: int = (
             -1
@@ -529,7 +530,7 @@ class InMemoryFileSystem:
         answer = input("Do you want to continue anyway? [y/N] ")
         return answer.strip().lower() in ("y", "yes")
 
-    def print_extra_info(self):
+    def print_extra_info(self) -> None:
         self.print_mddf_sector_info()
 
         # allocation_bitmap_sector_numbers = self.find_all_sector_numbers_with_given_file_id_type(0x0002)
@@ -540,7 +541,7 @@ class InMemoryFileSystem:
         # Note: the "hint sectors" don't have a fixed file id. Sample hint sector ids found in the wild: 0xFFBD, 0xFFE4, 0xFFF9.
         # It seems that they all start with 0xFF, but I don't know if that is always the case; so we can't find them by file id.
         # There are too-many free sectors: print(f"List of sector numbers with file id FILEID_FREE    (0x0000) : {self.find_all_sector_numbers_with_given_file_id_type(0x0000)}")
-        print(f"Printing some predefined sector types, derived from their tag data:")
+        print("Printing some predefined sector types, derived from their tag data:")
         print(
             f"List of sector numbers with file id FILEID_MDDF    (0x0001) : {self.find_all_sector_numbers_with_given_file_id_type(0x0001)}"
         )
@@ -596,7 +597,7 @@ class InMemoryFileSystem:
         # self.print_hint_sector_info(172)
         # self.pretty_print_tags_for_sector(172)
 
-    def remove_file_protection(self):
+    def remove_file_protection(self) -> None:
         """
         Find all the protected files on this disk image (see find_protected_files()), then
         edit each file's hint (hentry) sector on disk, setting:
@@ -714,7 +715,7 @@ class InMemoryFileSystem:
         # (No confirmation prompt: the user already confirmed above.)
         self.fix_dc42_checksum(confirm=False)
 
-    def fix_invalid_sector_checksums(self):
+    def fix_invalid_sector_checksums(self) -> None:
         """Scan ALL sectors of the image and fix any invalid per-sector tag checksums.
 
         For every sector whose XOR of all 20 tag bytes (including byte 11) plus all 512
@@ -806,7 +807,7 @@ class InMemoryFileSystem:
             self.fix_dc42_checksum(confirm=False)
         print("Done.")
 
-    def fix_dc42_checksum(self, confirm: bool = True):
+    def fix_dc42_checksum(self, confirm: bool = True) -> None:
         """Check the data and tags checksums in the DC42 header, and fix them only if they are wrong.
 
         The DC42 header stores a 32-bit checksum of the sector data at offset 0x48 and a
@@ -905,7 +906,7 @@ class InMemoryFileSystem:
                 )
         print("Done.")
 
-    def rename_volume(self, new_volume_name: str):
+    def rename_volume(self, new_volume_name: str) -> None:
         """
         Rename the volume: rewrite the "volname" field of the MDDF sector.
 
@@ -937,7 +938,7 @@ class InMemoryFileSystem:
         except UnicodeEncodeError as e:
             raise ValueError(
                 f"the new volume name contains characters that are not in the Mac Roman encoding ({e})."
-            )
+            ) from e
         if len(name_bytes) != len(new_volume_name):
             # mac-roman is a single-byte encoding, so this should never happen, but be safe:
             raise ValueError(
@@ -1082,7 +1083,7 @@ class InMemoryFileSystem:
             )
         return checksum_byte
 
-    def print_hint_sector_info(self, hint_sector_number: int):
+    def print_hint_sector_info(self, hint_sector_number: int) -> None:
         """Prints the hentry record (file header) found at the start of the given hint sector.
 
         Each file has a set of "hint" sectors; the first one starts with the hentry record,
@@ -1259,11 +1260,11 @@ class InMemoryFileSystem:
             )
         elif is_protected and is_master:
             print(
-                f"  >>> This file is a protected MASTER: it can be opened on any machine."
+                "  >>> This file is a protected MASTER: it can be opened on any machine."
             )
         else:
             print(
-                f"  >>> This file is NOT theft-protected: it can be opened on any machine."
+                "  >>> This file is NOT theft-protected: it can be opened on any machine."
             )
 
         # 0x80: the small file map ("smallmap" in the Lisa source):
@@ -1288,7 +1289,7 @@ class InMemoryFileSystem:
             f"  At 0x80 : {'file map':>18}: size={file_map_size} pages, max_entries={file_map_max_entries}, ecount={file_map_ecount}, entries={file_map_entries}"
         )
 
-    def print_sector_tags(self, start_sector: int, end_sector: int):
+    def print_sector_tags(self, start_sector: int, end_sector: int) -> None:
         """
         Each tag is 12 or 20 bytes.
 
@@ -1308,7 +1309,7 @@ class InMemoryFileSystem:
                 f"Tags for sector {i:#04}: {tags_as_hex_string} : file_id_type={file_id_type_to_string(file_id_type)}({file_id_type:#04x})"
             )
 
-    def print_mddf_sector_info(self):
+    def print_mddf_sector_info(self) -> None:
         mddf_sector_data_bytes = self._mddf_sector_bytes
         print(
             f"Printing info from the MDDF (Media Descriptor Data File) sector {self._mddf_sector_number}:"
@@ -1386,14 +1387,14 @@ class InMemoryFileSystem:
         hex_string = " ".join(f"{byte:02x}" for byte in tags_bytes)
         return hex_string
 
-    def pretty_print_tags_for_sector(self, sector_number: int):
+    def pretty_print_tags_for_sector(self, sector_number: int) -> None:
         """We can see what the tag values really mean in wswrite.c, function writeFileTagBytes(...)"""
         tags_bytes = self.read_tags_for_sector(
             sector_number
         )  # Either 12 or 20 bytes array
         if self._single_tag_size == 20:
             print(
-                f"Tag field names:        |verision|vol_id|file_id|dataused|abs_num|checksum|rel_num|fwd_link|bkwd_link|"
+                "Tag field names:        |verision|vol_id|file_id|dataused|abs_num|checksum|rel_num|fwd_link|bkwd_link|"
             )
             print(
                 f"Tags for sector {sector_number:<6}: |    {tags_bytes[0]:02x}{tags_bytes[1]:02x}|"  # verision (2 bytes)
@@ -1412,7 +1413,7 @@ class InMemoryFileSystem:
             #   fwd_link(11b)+dataused(5b) @8-9, bkwd_link(11b)+dataused(11b) @10-11
             # Links are MDDF-relative; 0x07FF = "no link".
             print(
-                f"Tag field names:        |version |vol_id |file_id|rel_num|fwd_link+dataused|bkwd_link+dataused|"
+                "Tag field names:        |version |vol_id |file_id|rel_num|fwd_link+dataused|bkwd_link+dataused|"
             )
             print(
                 f"Tags for sector {sector_number:<6}: |  {tags_bytes[0]:02x}{tags_bytes[1]:02x}|  {tags_bytes[2]:02x}{tags_bytes[3]:02x}|  {tags_bytes[4]:02x}{tags_bytes[5]:02x}|  {tags_bytes[6]:02x}{tags_bytes[7]:02x}|    {tags_bytes[8]:02x}{tags_bytes[9]:02x}        |    {tags_bytes[10]:02x}{tags_bytes[11]:02x}       |"
@@ -1475,7 +1476,7 @@ class InMemoryFileSystem:
         bitmap_byte = bitmap_sector_bytes[byte_index]
         return (bitmap_byte & bit_mask) == 0
 
-    def dump_free_bitmap_sectors_numbers(self):
+    def dump_free_bitmap_sectors_numbers(self) -> None:
         mddf_bytes = self._mddf_sector_bytes
         num_bits_in_allocation_bitmap = to_uint32_big_endian(
             mddf_bytes, 0x8C
@@ -1521,7 +1522,7 @@ class InMemoryFileSystem:
             f"Total number of free sectors found in the bitmap: {num_free_bitmap_sectors_numbers}"
         )
 
-    def dump_bitmap_sectors(self):
+    def dump_bitmap_sectors(self) -> None:
         first_relative_bitmap_start_sector_number = to_uint32_big_endian(
             self._mddf_sector_bytes, 0x88
         )  # Stored in the MDDF sector at offsert 0x88 (136 decimal); usually set to 1, whi9ch means that the first bitmap sector is the one immediately after the MDDF sector
@@ -1736,7 +1737,7 @@ class InMemoryFileSystem:
 
         return records
 
-    def dump_files(self, flatten: bool = False, output_dir: str | None = None):
+    def dump_files(self, flatten: bool = False, output_dir: str | None = None) -> None:
         """
         Dumps all files from the disk image to the host file system, into the dump folder
         (by default the system temp directory + '/LisaFileSystemDump'; creates the folder
@@ -1875,8 +1876,8 @@ class InMemoryFileSystem:
             )
         print(f"Done: wrote {num_files_written} file(s) to {resolved_output_dir}")
 
-    def check_bitmap_for_all_file_data(self):
-        """ """
+    def check_bitmap_for_all_file_data(self) -> None:
+        """Verify that every allocated file-data sector is marked occupied in the volume allocation bitmap."""
         print(
             "\nChecking the allocation bitmap, to see if it appears occupied for all file data sectors ..."
         )
@@ -1978,7 +1979,7 @@ class InMemoryFileSystem:
                             f"Infinite loop detected while reading contents of file_id {self.get_file_id_type_from_tag_data_for_sector(current_abs_sector)}, file_name '{file_name}'! Perhaps the file system is corrupted? Exiting."
                         )
 
-    def visualize_volume(self):
+    def visualize_volume(self) -> None:
         """Print a one-character-per-sector map of the whole volume, 64 sectors per line,
         covering every sector of the disk image (sector 0 .. num_sectors-1).
 
@@ -2170,7 +2171,7 @@ class InMemoryFileSystem:
         )
         print(f"\nSector counts: {summary} (total {num_sectors})")
 
-    def find_catalog_root_page_sector_number(self):
+    def find_catalog_root_page_sector_number(self) -> int:
         """
         Returns the first sector of the catalog entries (aka "root catalog sector number). The returned sector number is relative to the MDDF sector,
         meaning that the absolute sector number is the returned number + self._mddf_sector_number
@@ -2191,7 +2192,7 @@ class InMemoryFileSystem:
         #         return sector_number
         # raise "While looking for the root catalog sector: could not find ANY sector whose file_id is 0x0004 (a catalog). Cannot continue, exiting."
 
-    def dump_catalog(self, verbose: bool = False):
+    def dump_catalog(self, verbose: bool = False) -> None:
         """
         Dump every entry (files, directories, threads, ...) in the HFS B-tree catalog.
 
@@ -2361,7 +2362,7 @@ class InMemoryFileSystem:
         )
         return protected_hint_sector_numbers
 
-    def get_sentry_for_sfile(self, s_file_id: int):
+    def get_sentry_for_sfile(self, s_file_id: int) -> tuple[int | None, int | None]:
         """
         Look up the 14-byte s_entry record for an s-file number in the volume's s_entry table
         (the "slist"), and return (hint_sector_number, data_start_sector_number) as ABSOLUTE
@@ -2624,7 +2625,7 @@ class InMemoryFileSystem:
         version = to_uint16_big_endian(table_page, record_offset + 12)
         return (hintaddr, fileaddr, filesize, version)
 
-    def _flat_catalog_sfile_range(self):
+    def _flat_catalog_sfile_range(self) -> tuple[int, int]:
         """Returns (first_sfile, last_sfile) to scan: all sfiles that may hold a file.
         We scan the whole slist (1 .. slist_packing*slist_block_count-1) and let the
         callers skip the unused (hintaddr=0) slots.
@@ -2639,7 +2640,7 @@ class InMemoryFileSystem:
             return (1, empty_file - 1)
         return (1, slist_packing * slist_block_count - 1)
 
-    def _locate_hint_page_for_sfile(self, s_file_id: int, hint_sector_number: int):
+    def _locate_hint_page_for_sfile(self, s_file_id: int, hint_sector_number: int) -> int | None:
         """Verify that the hint_sector_number really is the hint page of the given s-file, by looking at  tag data.
 
         If it is, just return the passed hint_sector_number.
@@ -2826,7 +2827,7 @@ class InMemoryFileSystem:
                 break
         return bytes(out[:filesize])
 
-    def _decode_tag_dataused_and_fwd_link(self, tag: bytes):
+    def _decode_tag_dataused_and_fwd_link(self, tag: bytes) -> tuple[int, int, int]:
         """Decode (dataused, fwd_link, end_sentinel) from a sector's tag.
 
         dataused     = the number of valid bytes in the sector's 512-byte data field.
@@ -2869,7 +2870,7 @@ class InMemoryFileSystem:
             f"Unsupported tag size {self._single_tag_size} in _decode_tag_dataused_and_fwd_link."
         )
 
-    def _find_rootcatalog_sfile(self):
+    def _find_rootcatalog_sfile(self) -> int:
         """Find the s_file_id of the root catalog: the sfile whose hentry ftype is rootcat (2).
         On flat-catalog volumes this is the sfile number `first_file` from the MDDF, but we
         locate it by scanning the slist, which is more robust."""
@@ -2888,7 +2889,7 @@ class InMemoryFileSystem:
             "Could not find the rootcatalog sfile (no hentry with ftype=rootcat=2 in the slist)."
         )
 
-    def flat_catalog_list_files(self):
+    def flat_catalog_list_files(self) -> None:
         """List all files on this flat-catalog (fs_version 14/15) volume, using the slist
         and the hint (hentry) sectors. No B-tree is involved."""
         first_sfile, last_sfile = self._flat_catalog_sfile_range()
@@ -3022,7 +3023,7 @@ class InMemoryFileSystem:
 
         rows: list = []  # (depth, record)
 
-        def walk(rec, depth, path):
+        def walk(rec: _CatalogRecord, depth: int, path: frozenset[int]) -> None:
             rows.append((depth, rec))
             if rec.self_id in path:  # a cycle of parent ids: do not follow it
                 return
@@ -3072,7 +3073,7 @@ class InMemoryFileSystem:
         )
         return 0
 
-    def flat_catalog_dump_catalog(self):
+    def flat_catalog_dump_catalog(self) -> None:
         """Dump the flat (hashed) catalog of this fs_version 14/15 volume: it is the data of
         the rootcatalog file, an array of 54-byte centry records (see the comment above).
         Cross-checks each entry against the slist and verifies the hash slot placement.
@@ -3150,7 +3151,7 @@ class InMemoryFileSystem:
                         )
                         hint_name = pascal_to_string(hint_bytes, start=0)
                         if hint_name != name:
-                            slist_note = f"  (slist hint name mismatch!)"  # don't print the hint_name, it is garbage
+                            slist_note = "  (slist hint name mismatch!)"  # don't print the hint_name, it is garbage
             print(
                 f"  slot {slot:5}: '{name}': cetype={cetype_names.get(cetype, f'unknown {cetype}')} ({cetype}), sfile={sfile}, "
                 f"attributes={attributes:#010x}, readpage={readpage} (off {readoffset}), writepage={writepage} (off {writeoffset}){hash_note}{slist_note}"
@@ -3205,7 +3206,7 @@ class InMemoryFileSystem:
 
     def _dump_files_flat_catalog(
         self, flatten: bool = False, output_dir: str | None = None
-    ):
+    ) -> None:
         """fs_version 14/15 variant of dump_files(): write the contents of every file in the
         slist to the dump folder (by default the system temp directory + '/LisaFileSystemDump'),
         following each file's tag chain (see
@@ -3361,7 +3362,7 @@ class _CatalogRecord:
     """One TcatRec of '{!CATALOG}' (APDM/CAT.TEXT): the 56-byte fixed part,
     then the variable-length name (Vfld nameDesc) and extra data (extraDesc)."""
 
-    def __init__(self, raw: bytes):
+    def __init__(self, raw: bytes) -> None:
         (
             self.parent_id, name_size, name_offset, self.self_id, self.kind,
             self.state, self.view, self.props, _top, _left, _bottom, _right,
@@ -3403,7 +3404,7 @@ def parse_catalog_database(data: bytes) -> tuple[int, list]:
     if page_size < 512 or page_size % 512 or first_page < CATALOG_HEADER_SIZE:
         raise ValueError(f"unexpected page layout (page size {page_size}, first page at {first_page})")
 
-    def read_page(offset: int):
+    def read_page(offset: int) -> tuple[int, int, list[bytes]]:
         if offset < first_page or offset + page_size > len(data):
             raise ValueError(f"page offset {offset} is outside the file")
         page = data[offset : offset + page_size]
@@ -3465,7 +3466,7 @@ def flat_catalog_hash(name: str, maxindex: int) -> int:
     return temp % maxindex
 
 
-def pascal_to_string(pascal_string: bytes, encoding="mac-roman", start: int = 0) -> str:
+def pascal_to_string(pascal_string: bytes, encoding: str = "mac-roman", start: int = 0) -> str:
     """Converts a Pascal-style string (length-prefixed) to a Python string.
 
     Args:
@@ -3490,7 +3491,7 @@ def pascal_to_string(pascal_string: bytes, encoding="mac-roman", start: int = 0)
     return dest.decode(encoding) if actual_length > 0 else ""
 
 
-def fixed_len_bytes_to_string(fixed_field: bytes, encoding="ascii") -> str:
+def fixed_len_bytes_to_string(fixed_field: bytes, encoding: str = "ascii") -> str:
     """Converts a fixed-length, space-padded name field to a Python string.
 
     Unlike pascal_to_string(), the field carries no length byte: it is a
@@ -3658,16 +3659,14 @@ def compute_dc42_checksum(data_bytes: bytes | bytearray | memoryview) -> int:
     return checksum
 
 
-def disk_type_to_string(disk_type: int):
+def disk_type_to_string(disk_type: int) -> str:
     if disk_type == 0x00:
         return "sony400k"
     elif disk_type == 0x01:
         return "sony800k"
     elif disk_type == 0x02:
         return "720k"
-    elif disk_type == 0x03:
-        return "profile-i-guess"
-    elif disk_type == 0x5D:
+    elif disk_type in (0x03, 0x5D):
         return "profile-i-guess"
     elif disk_type == 0x54:
         return "twiggy872k"
@@ -3696,7 +3695,7 @@ FILETYPE_NAMES = {
 }
 
 
-def file_system_version_to_string(fs_version: int):
+def file_system_version_to_string(fs_version: int) -> str:
     if (
         fs_version == 17
     ):  # aka SPRING_VERSION in file LISA_OS/OS/SOURCE-VMSTUFF.TEXT.unix.txt
@@ -3711,7 +3710,7 @@ def file_system_version_to_string(fs_version: int):
         return "UNKNOWN!"
 
 
-def tag_size_to_string(tag_size: int):
+def tag_size_to_string(tag_size: int) -> str:
     if tag_size == 12:
         return "Floppy disk image"
     elif tag_size == 20:
@@ -3720,7 +3719,7 @@ def tag_size_to_string(tag_size: int):
         return "UNKNOWN!"
 
 
-def disk_format_to_string(disk_format: int):
+def disk_format_to_string(disk_format: int) -> str:
     """
     There are a few other known formats
     that are not below, see
@@ -3732,15 +3731,13 @@ def disk_format_to_string(disk_format: int):
         return "sony800k"
     elif disk_format == 0x01:
         return "twiggy872k"
-    elif disk_format == 0x93:
-        return "profile-i-guess"
-    elif disk_format == 0x96:
+    elif disk_format in (0x93, 0x96):
         return "profile-i-guess"
     else:
         return "UNKNOWN!"
 
 
-def file_id_type_to_string(file_id_: int):
+def file_id_type_to_string(file_id_: int) -> str:
     if file_id_ == 0x0000:
         return "FILEID_FREE"
     elif file_id_ == 0xAAAA:
@@ -3831,7 +3828,7 @@ def to_uint16_big_endian(byte_array: bytes | bytearray | memoryview, offset: int
     return struct.unpack(">H", byte_array[offset : offset + 2])[0]
 
 
-def print_bytes_in_hex_and_ascii(bytes_to_print):
+def print_bytes_in_hex_and_ascii(bytes_to_print: bytes | bytearray | memoryview) -> None:
     chunk_size = 16
     print(f"--- Displaying {len(bytes_to_print)} bytes ---")
     for i in range(0, len(bytes_to_print), chunk_size):
@@ -3848,10 +3845,10 @@ def print_bytes_in_hex_and_ascii(bytes_to_print):
                     "."  # Replace non-printable characters with a dot
                 )
         print(f"{i:04x}: {hex_representation:<48} | {ascii_representation}")
-    print(f"--- End of data ---")
+    print("--- End of data ---")
 
 
-def print_fields_in_byte_array(field_definitions, byte_array, start_offset: int):
+def print_fields_in_byte_array(field_definitions: Sequence[Sequence[Any]], byte_array: bytes | bytearray | memoryview, start_offset: int) -> None:
     """
     Parses a byte array based on a list of field definitions and prints
     the formatted hexadecimal value for each field.

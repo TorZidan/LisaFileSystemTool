@@ -81,14 +81,14 @@ print()
 # Like making new source files and filling them with portions of others.
 # Commenting will resume when we get to the find and replace patches later on!
 found_file = False
-for root, dir, files in os.walk(source_directory):
-    for directory in dir:
+for root, dirs, _files in os.walk(source_directory):
+    for directory in dirs:
         if directory.upper() == 'LIBPL':
             found_file = True
             full_path = os.path.abspath(os.path.join(root, directory)) + '/'
             break
 if found_file:
-    libpl = True;
+    libpl = True
     found_file = False
     for file_name in os.listdir(full_path):
         if 'LIBPL-PASMATH' in file_name.upper():
@@ -96,7 +96,7 @@ if found_file:
             found_file = True
             break
     if not found_file:
-        for root, dir, files in os.walk(source_directory):
+        for root, _dir, files in os.walk(source_directory):
             for file_name in files:
                 if 'SOURCE-PASMATH' in file_name.upper():
                     full_path_2 = os.path.abspath(os.path.join(root, file_name))
@@ -119,7 +119,7 @@ else:
 if libpl:
     found_file = False
     osint = False
-    for root, dir, files in os.walk(source_directory):
+    for root, _dir, files in os.walk(source_directory):
             for file_name in files:
                 if 'SOURCE-OSINTPASLIB' in file_name.upper():
                     full_path_2 = os.path.abspath(os.path.join(root, file_name))
@@ -140,9 +140,7 @@ if libpl:
                     start_index = index
                 if '; File: PASRANGE.TEXT' in line:
                     stop_index = index
-            new_contents = []
-            for index, a in enumerate(range(start_index, stop_index)):
-                new_contents.append(osintpaslib[index + start_index])
+            new_contents = osintpaslib[start_index:stop_index]
             new_contents.append('       .END')
             with open(full_path + 'LIBPL-PASMOVE.TEXT', 'w', encoding='iso-8859-1') as libpl_pasmove:
                 libpl_pasmove.writelines(new_contents)
@@ -167,9 +165,7 @@ if libpl:
                     start_index = index
                 if '; File: PASMOVE.TEXT' in line:
                     stop_index = index
-            new_contents = []
-            for index, a in enumerate(range(start_index, stop_index)):
-                new_contents.append(osintpaslib[index + start_index])
+            new_contents = osintpaslib[start_index:stop_index]
             new_contents.append('       .END')
             with open(full_path + 'LIBPL-PASMISC.TEXT', 'w', encoding='iso-8859-1') as libpl_pasmisc:
                 libpl_pasmisc.writelines(new_contents)
@@ -190,9 +186,7 @@ if libpl:
                     start_index = index
                 if '; File: PASSCOMP.TEXT' in line:
                     stop_index = index
-            new_contents = []
-            for index, a in enumerate(range(start_index, stop_index)):
-                new_contents.append(osintpaslib[index + start_index])
+            new_contents = osintpaslib[start_index:stop_index]
             new_contents.append('       .END')
             with open(full_path + 'LIBPL-PASRANGE.TEXT', 'w', encoding='iso-8859-1') as libpl_pasrange:
                 libpl_pasrange.writelines(new_contents)
@@ -201,7 +195,7 @@ if libpl:
 
 
 found_file = False
-for root, dir, files in os.walk(source_directory):
+for root, _dir, files in os.walk(source_directory):
     for file_name in files:
         if 'LIBOS-SYSCALL' in file_name.upper():
             full_path = os.path.abspath(os.path.join(root, file_name))
@@ -218,7 +212,7 @@ if found_file:
                 break
         if found_file:
             found_file = False
-            for root, dir, files in os.walk(source_directory):
+            for root, _dir, files in os.walk(source_directory):
                 for file_name in files:
                     if 'SOURCE-SYSCALL' in file_name.upper():
                         full_path_2 = os.path.abspath(os.path.join(root, file_name))
@@ -235,14 +229,14 @@ if found_file:
                 total_patches_applied += 1
 
             else:
-                print(f'WARNING: Failed to find file SOURCE/SYSCALL.TEXT. So we can\'t update LIBOS/SYSCALL.TEXT!')
+                print('WARNING: Failed to find file SOURCE/SYSCALL.TEXT. So we can\'t update LIBOS/SYSCALL.TEXT!')
 else:
-    print(f'WARNING: Failed to find file LIBOS/SYSCALL.TEXT. It will not be modified!')
+    print('WARNING: Failed to find file LIBOS/SYSCALL.TEXT. It will not be modified!')
 
 
 found_file = False
 print('TKALERT.TEXT:')
-for root, dir, files in os.walk(source_directory):
+for root, _dir, files in os.walk(source_directory):
     for file_name in files:
         if 'TKALERT' in file_name.upper() and 'LINKMAPS AND MISC. 3.0' in root.upper():
             full_path = os.path.abspath(os.path.join(root, file_name))
@@ -253,7 +247,7 @@ if found_file:
     with open(full_path, 'r', encoding='iso-8859-1') as tkalert:
         contents = tkalert.readlines()
     found_file = False
-    for root, dir, files in os.walk(source_directory):
+    for root, _dir, files in os.walk(source_directory):
         for file_name in files:
             if 'TKALERT' in file_name.upper() and not 'LINKMAPS AND MISC. 3.0' in root.upper():
                 full_path_2 = os.path.abspath(os.path.join(root, file_name))
@@ -269,12 +263,12 @@ if found_file:
         total_patches_applied += 1
 
     else:
-        print(f'    LISA_OS/TKALERT.TEXT already exists, skipping.')
+        print('    LISA_OS/TKALERT.TEXT already exists, skipping.')
 else:
-    print(f'    WARNING: Failed to find file Linkmaps and Misc. 3.0/TKALERT.TEXT!')
+    print('    WARNING: Failed to find file Linkmaps and Misc. 3.0/TKALERT.TEXT!')
 
 found_file = False
-for root, dir, files in os.walk(source_directory):
+for root, _dir, files in os.walk(source_directory):
     for file_name in files:
         if 'APLW-UNITLOTUS' in file_name.upper():
             full_path = os.path.abspath(os.path.join(root, file_name))
@@ -309,7 +303,7 @@ print()
 if total_patches_applied == total_possible_patches:
     print(f'Successfully performed {total_patches_applied}/{total_possible_patches} file grafts.')
 elif total_patches_applied == 0:
-    print(f'No file grafts applied. Your code has probably already been patched!')
+    print('No file grafts applied. Your code has probably already been patched!')
 else:
     print(f'WARNING: Performed {total_patches_applied}/{total_possible_patches} file grafts. Check the output above to see where the problems occurred!')
 
@@ -322,14 +316,14 @@ print()
 total_patches_applied = 0
 total_possible_patches = 0
 
-for entry in patches: # Iterate through each file in our patch dictionary.
-    for patch in patches[entry]: # And then iterate through each patch for that file.
+for patch_list in patches.values(): # Iterate through each file in our patch dictionary.
+    for patch in patch_list: # And then iterate through each patch for that file.
         total_possible_patches += patch[2] # Sum up all the individual patches to report to the user later.
 
-for entry in patches: # Iterate through all the files we need to patch again.
+for entry, patch_list in patches.items(): # Iterate through all the files we need to patch again.
     proper_name = entry.replace('-', '/') + '.TEXT' # And convert the filename into a nice and pretty Lisa-formatted name.
     found_file = False
-    for root, dir, files in os.walk(source_directory): # Iterate through all the files in the Lisa_Source directory.
+    for root, _dir, files in os.walk(source_directory): # Iterate through all the files in the Lisa_Source directory.
         if found_file == True:
             break
         for file_name in files: # And check each file's name to see if it matches the file that we want to patch.
@@ -343,7 +337,7 @@ for entry in patches: # Iterate through all the files we need to patch again.
         print(f'{proper_name}:')
         with open(full_path, 'r', encoding='iso-8859-1') as source_file: # Then open it up and read it in as a list of lines.
             contents = source_file.readlines()
-        for patch in patches[entry]: # Iterate through each patch that we want to perform.
+        for patch in patch_list: # Iterate through each patch that we want to perform.
             success_count = 0
             for index, line in enumerate(contents): # And search through each line in the file until we find the "find string" that we need to replace.
                 if patch[0] in line:
@@ -364,6 +358,6 @@ print()
 if total_patches_applied == total_possible_patches: # If we applied all the patches, tell the user we succeeded.
     print(f'Successfully applied {total_patches_applied}/{total_possible_patches} patches.')
 elif total_patches_applied == 0: # If we applied no patches, tell them that the code has probably already been patched.
-    print(f'No patches applied. Your code has probably already been patched!')
+    print('No patches applied. Your code has probably already been patched!')
 else: # If we're somewhere in between those two extremes, then the user probably has something to worry about!
     print(f'WARNING: Applied {total_patches_applied}/{total_possible_patches} patches. Check the output above to see where the problems occurred!')

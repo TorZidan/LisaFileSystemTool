@@ -1,6 +1,6 @@
 import importlib.util
 import os
-import sys, io, contextlib
+import sys, io
 spec = importlib.util.spec_from_file_location("lst", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "LisaFileSystemTool.py"))
 lst = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(lst)

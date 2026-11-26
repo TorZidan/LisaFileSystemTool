@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import os, struct, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from LisaFileSystemTool import InMemoryFileSystem, pascal_to_string
+from LisaFileSystemTool import InMemoryFileSystem
 
 IMG = "/tmp/lisaem-profile-5MB-FreshInstallOf_PascalWorkshop1.0.dc42"
 fs = InMemoryFileSystem(IMG)

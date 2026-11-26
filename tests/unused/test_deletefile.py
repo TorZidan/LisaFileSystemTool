@@ -26,7 +26,6 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from LisaFileSystemTool import InMemoryFileSystem
 from LisaFileSystemToolPerFile import FileSystemWithPerFileCommands, BTREE_BAD, BTREE_LEAF
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

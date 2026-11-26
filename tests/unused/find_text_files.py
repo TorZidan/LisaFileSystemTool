@@ -1,4 +1,4 @@
-import importlib.util, sys, glob, os
+import importlib.util, os
 spec = importlib.util.spec_from_file_location("tool", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "LisaFileSystemTool.py"))
 mod = importlib.util.module_from_spec(spec)
 import io

@@ -154,9 +154,7 @@ def is_plausible_seg_name(raw: bytes) -> bool:
             return False
         if b == 0x20:
             seen_space = True
-        elif seen_space:
-            return False
-        elif b not in SEG_NAME_CHARS:
+        elif seen_space or b not in SEG_NAME_CHARS:
             return False
     return True
 
@@ -567,7 +565,7 @@ def scan_segments_in_lib(file_as_bytes: bytes, file_name: str = "<lib>") -> list
             f"dir at 0x{seg_dir:06X}, {len(seg_entries)} records):"
         )
         print("--------------------------------------------------------------")
-        for offset, unit_name, segment_num_raw, segment_num, descriptor, extra, lib_file_id, raw18 in seg_entries:
+        for offset, unit_name, _segment_num_raw, segment_num, descriptor, _extra, lib_file_id, _raw18 in seg_entries:
             version1 = descriptor[1:4]
             version2 = descriptor[5:]
             libname = lib_file_id_table.get(lib_file_id, "Unknown library file")
@@ -774,7 +772,7 @@ class LisaExecutableFileAnalyzer(FileSystemWithPerFileCommands):
         else:
             print(f"\nUnits referenced by executable file '{found_exec_file_name}':")
             print("-------------------------")
-            for offset, unit_name_in_exec, unit_num_in_exec, unit_type in sorted(exec_file_units, key=lambda e: e[1]):
+            for _offset, unit_name_in_exec, unit_num_in_exec, _unit_type in sorted(exec_file_units, key=lambda e: e[1]):
                 matching = [e for e in all_intrinsic_units if e[1] == unit_name_in_exec]
                 if matching:
                     unit_num_in_intrinsic_lib = matching[0][2]
@@ -797,10 +795,9 @@ class LisaExecutableFileAnalyzer(FileSystemWithPerFileCommands):
             if not exec_file_segments:
                 print("(none found)")
                 problems.append(f"no segment table found in file {found_exec_file_name} (the file may not be a Lisa executable file)")
-            for offset, seg_name_in_exec, seg_num_in_exec, desc, exec_raw in sorted(exec_file_segments, key=lambda e: e[1]):
+            for _offset, seg_name_in_exec, seg_num_in_exec, _desc, exec_raw in sorted(exec_file_segments, key=lambda e: e[1]):
                 matching = [e for e in all_intrinsic_segments if e[1] == seg_name_in_exec]
                 if matching:
-                    seg_num_in_lib = matching[0][3]
                     intrinsic_lib_file_id = matching[0][6]
                     lib_raw = matching[0][7]
                     # Compare the whole 18-byte segment entry, which includes the segment name, number, Version1, Version2, and other metadata.
@@ -825,7 +822,7 @@ class LisaExecutableFileAnalyzer(FileSystemWithPerFileCommands):
 
         # Detect duplicate unit numbers in INTRINSIC.LIB.
         by_unit = {}
-        for offset, unit_name, unit_number, intrinsic_lib_file_id in all_intrinsic_units:
+        for _offset, unit_name, unit_number, _intrinsic_lib_file_id in all_intrinsic_units:
             by_unit.setdefault(unit_number, []).append(unit_name)
 
         duplicates = {u: n for u, n in by_unit.items() if len(n) > 1}

@@ -6,7 +6,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from LisaFileSystemToolPerFile import (
     build_lisa_text_file_data,
     TEXT_FILE_PAGE_SIZE,
-    TEXT_FILE_HEADER_SIZE,
 )
 
 PAGE = TEXT_FILE_PAGE_SIZE

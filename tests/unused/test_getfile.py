@@ -32,7 +32,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from LisaFileSystemTool import InMemoryFileSystem, lisa_text_file_to_host_text
+from LisaFileSystemTool import lisa_text_file_to_host_text
 from LisaFileSystemToolPerFile import FileSystemWithPerFileCommands, BTREE_LEAF
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

@@ -25,7 +25,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from LisaFileSystemTool import InMemoryFileSystem, lisa_text_file_to_host_text
-from LisaFileSystemToolPerFile import AddFileMixin, ReplaceFileMixin, build_lisa_text_file_data
+from LisaFileSystemToolPerFile import ReplaceFileMixin, build_lisa_text_file_data
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOOL = os.path.join(REPO_ROOT, "LisaFileSystemToolPerFile.py")
