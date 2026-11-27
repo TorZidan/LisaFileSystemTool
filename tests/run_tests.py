@@ -7,7 +7,7 @@ image files in this folder:
 
   LisaFileSystemTool.py:
       deserialize, info, list, list-los, visualize, dump, dump-flatten,
-      fix-dc42-checksum, rename-volume
+      fix-dc42-checksum, rename-volume, change-boot-id
   LisaFileSystemToolPerFile.py:
       add, replace, put, delete, get
 
@@ -335,6 +335,47 @@ def test_fix_dc42_checksum_corrupted(results, image, info, copy):
         and re.search(r"Computed Tag Checksum:\s+0x[0-9a-f]+ : OK", out2),
         out2[-2000:],
     )
+
+
+def test_change_boot_id(results, image, info, copy):
+    rc, out = run_tool(TOOL, ["change-boot-id", copy])
+    results.check(image, "change-boot-id (show): exit code 0", rc == 0, out[-2000:])
+    results.check(
+        image,
+        "change-boot-id (show): prints the PRAM snapshot",
+        "Parameter memory (PRAM) snapshot" in out,
+        out[-2000:],
+    )
+    rc, out = run_tool(TOOL, ["change-boot-id", copy, "nonsense"], stdin="y\n")
+    results.check(image, "change-boot-id (bad target): exit code 1", rc == 1, out[-2000:])
+    if info.fs_version not in (16, 17):
+        rc, out = run_tool(TOOL, ["change-boot-id", copy, "parallel"], stdin="y\n")
+        results.check(
+            image, "change-boot-id (pre-LOS 3 volume): refused with exit code 1", rc == 1, out[-2000:]
+        )
+        return
+    for target in ("parallel", "slot2-port1", "all-parallel"):
+        rc, out = run_tool(TOOL, ["change-boot-id", copy, target], stdin="y\n")
+        results.check(image, f"change-boot-id {target}: exit code 0", rc == 0, out[-2000:])
+        rc, out = run_tool(TOOL, ["change-boot-id", copy, target], stdin="y\n")
+        results.check(
+            image,
+            f"change-boot-id {target} (again): reports nothing to do",
+            rc == 0 and "Nothing to do" in out,
+            out[-2000:],
+        )
+    rc, out = run_tool(TOOL, ["change-boot-id", copy])
+    results.check(
+        image,
+        "change-boot-id: entries visible, checksum valid",
+        "#11 (built-in parallel port)" in out
+        and "#2#1 (expansion slot 2, port 1)" in out
+        and "#1#2 (expansion slot 1, port 2)" in out
+        and "(valid)" in out,
+        out[-2000:],
+    )
+    rc, out = run_tool(TOOL, ["info", copy])
+    results.check(image, "change-boot-id: 'info' still works", rc == 0, out[-2000:])
 
 
 def test_rename_volume(results, image, info, copy):
@@ -762,6 +803,9 @@ def run_image_tests(results, image):
 
         rename_copy = fresh_copy(workdir, src, "rename" + ext)
         test_rename_volume(results, image, info, rename_copy)
+
+        boot_id_copy = fresh_copy(workdir, src, "bootid" + ext)
+        test_change_boot_id(results, image, info, boot_id_copy)
 
         deserialize_copy = fresh_copy(workdir, src, "deserialize" + ext)
         test_deserialize(results, image, info, deserialize_copy)

@@ -57,6 +57,7 @@ python3 LisaFileSystemTool.py <command> <disk image file name>
 python3 LisaFileSystemTool.py dump <disk image file name> [output folder]
 python3 LisaFileSystemTool.py dump-flatten <disk image file name> [output folder]
 python3 LisaFileSystemTool.py rename-volume <disk image file name> <new volume name>
+python3 LisaFileSystemTool.py change-boot-id <disk image file name> [parallel|internal|all-parallel|slotN-portM]
 ```
 
 | Command     | What it does |
@@ -71,6 +72,7 @@ python3 LisaFileSystemTool.py rename-volume <disk image file name> <new volume n
 | `fix-dc42-checksum`| For DC42 files: checks if the data and tag checksums are correct in the DC42 header, and fixes the incorrect ones, if any. |
 | `fix-sector-checksums` | For disk images with 20-byte tags (hard disk images): checks the per-sector tag checksum byte across all sectors, asks for y/N confirmation if invalid checksums are found, and rewrites the repaired checksums (plus DC42 header checksums if applicable). |
 | `rename-volume` | Renames the volume: rewrites the `volname` field (a Pascal string of up to 33 characters, Mac Roman) at offset 12 of the MDDF sector (see §4), then fixes up all affected checksums (the per-sector tag checksum for 20-byte tags, and the DC42 header checksums for DC42 files). The new name is given as the third command-line argument and is validated first (non-empty, ≤ 33 characters, no '/', Mac-Roman encodable); a y/N confirmation is asked before anything is written. |
+| `change-boot-id` | (LOS 3.x volumes) Makes a boot volume bootable from another boot device position, e.g. after moving a ProFile/ESProfile from a Lisa 2/10 (I/O ROM 88) to a Lisa 2/5 (I/O ROM A8), which otherwise fails with boot error **10738** ("can't find boot cd"). Without a target, prints the PRAM snapshot of the MDDF and its device configuration (read-only). With a target (`parallel`, `internal`, `all-parallel`, `slot1-port1` .. `slot3-port2`), adds the device entries that the OS needs for that boot position, keeps all other entries, recomputes the PRAM checksum and fixes the tag + DC42 checksums. A valid PRAM in the machine (or in LisaEm's config file) has priority over the snapshot on the disk; see [PRAM.md](PRAM.md). |
 
 
 ### 1.2 LisaFileSystemToolPerFile.py  — adding, replacing, deleting and getting files
@@ -293,7 +295,7 @@ Key fields (byte offsets within the MDDF sector):
 | 0xBA | 4 | `freecount` | number of free pages |
 | 0xBE | 2 | `rootsnum` | s-file number of the root catalog file |
 | 0xC0 | 2 | `rootmaxentries` | max number of centries in the root catalog |
-| 0xC2 | … | `mountinfo`, `overmount_stamp`, `pmem_id`, `pmem` (65 bytes) | mount state / parameter memory |
+| 0xC2 | … | `mountinfo`, `overmount_stamp`, `pmem_id`, `pmem` (66 bytes: `alarm_ref` + the 64-byte PRAM snapshot at 0xD2, see §4.1) | mount state / parameter memory |
 | 0x112 | 1 | `vol_scavenged` / `tbt_copied` | booleans |
 | 0x114 | 2 | `smallmap_offset` | byte offset of the small file map in the hint page |
 | 0x116 | 2 | `hentry_offset` | byte offset of the hentry in the hint page |
@@ -310,6 +312,15 @@ Key fields (byte offsets within the MDDF sector):
 | 0x138 | 2 | `vol_mounted` | mounted flag |
 
 ---
+
+### 4.1 The PRAM snapshot and the boot device position (`change-boot-id`)
+
+The MDDF field `pmem` (offset 208) holds `alarm_ref` (2 bytes) and a snapshot of the 64 bytes of
+the Lisa's parameter memory (PRAM), which in LOS 3.x includes the device configuration. A LOS 3.x
+volume boots only from a position that this configuration lists (or a built-in one, such as the
+Lisa 2/10 internal disk); otherwise the boot fails with error 10738. The `change-boot-id` command
+adds the missing entries. See [PRAM.md](PRAM.md) for the PRAM layout, the boot logic, the command's
+targets, and the LisaEm notes.
 
 ## 5. The file-system structures
 
@@ -824,6 +835,8 @@ The maximum possible date is: 2037-02-06 06:28:15 GMT (i.e. value 0xFFFFFFFF = 4
 | `fix_dc42_checksum` / `fix_invalid_sector_checksums` | `fix-dc42-checksum` command and per-sector 20-byte tag checksum repair. |
 | `list_los` / `parse_catalog_database` | `list-los` command: read the Desktop Manager's LIBDB catalog `{!CATALOG}` and print the desktop objects as a tree, with the OS files of each (`{T<tool>}`, `{D<id>T<tool>}`, `{F<id>}`). |
 | `rename_volume` | `rename-volume` command: validate the new name, rewrite the 34-byte `volname` Pascal string at MDDF offset 12, fix tag + DC42 checksums. |
+| `change_boot_id` / `print_pram_snapshot` | `change-boot-id` command: decode the PRAM snapshot at MDDF offset 210 (`decode_pram_device_entries`), add the entries for the target boot position (`boot_target_to_pram_entries`, `encode_pram_device_entry`), recompute the PRAM checksum (`compute_pram_checksum`), fix tag + DC42 checksums ([PRAM.md](PRAM.md)). |
+| `_write_into_mddf_sector` | Shared by `rename_volume` and `change_boot_id`: write bytes into the MDDF sector, verify, fix the 20-byte tag checksum. |
 | `is_sector_free_in_bitmap` / `dump_bitmap_sectors` / `dump_free_bitmap_sectors_numbers` / `check_bitmap_for_all_file_data` | Allocation-bitmap inspection and consistency checks. |
 | `derive_mddf_sector_number_from_boot_sector_zero` | Reproduce the boot ROM/loader MDDF derivation (§3). |
 
@@ -844,7 +857,7 @@ The maximum possible date is: 2037-02-06 06:28:15 GMT (i.e. value 0xFFFFFFFF = 4
 * **Stale smallmaps** can occur after a file is shrunk — use the tag chain, not the
   smallmap, for data.
 * The output directory `<temp dir>/LisaFileSystemDump/` is derived from the system temp directory (e.g. `/tmp` on Linux/macOS or `C:\Users\<user>\AppData\Local\Temp` on Windows); HFS subdirectories and `/` in Lisa file names become host subfolders (or `-` in `dump-flatten`), while unsafe names (`..` or leading `/`) are skipped.
-* `deserialize`, `fix-dc42-checksum`, and `rename-volume` need an interactive terminal for confirmation prompts; without one they abort safely.
+* `deserialize`, `fix-dc42-checksum`, `rename-volume`, and `change-boot-id <target>` need an interactive terminal for confirmation prompts; without one they abort safely.
 * The whole image must fit in memory (and be ≤ 100 MB).
 
 

@@ -964,73 +964,232 @@ class InMemoryFileSystem:
         volname_field[0] = len(name_bytes)
         volname_field[1 : 1 + len(name_bytes)] = name_bytes
 
-        sector_start_file_offset = self._sector_data_file_offset(
-            self._mddf_sector_number
-        )
-        volname_file_offset = sector_start_file_offset + 12  # volname at offset 12 in the MDDF sector
-
         print(
             f"Renaming the volume from '{old_volume_name}' to '{new_volume_name}' in '{self._file_name}' ..."
         )
-        try:
-            file_in_rw_mode = open(self._file_name, "r+b")
-        except OSError as e:
-            print(f"ERROR: cannot open '{self._file_name}' for writing: {e}")
+        # volname is at offset 12 in the MDDF sector. The helper also fixes the per-sector tag checksum
+        # (20-byte tags only; 12-byte floppy tags have no checksum field).
+        if not self._write_into_mddf_sector(12, bytes(volname_field), "volname"):
             return
-        with file_in_rw_mode:
-            # We write the same data to the file on disk and to the in-memory copy self._file, so that we can later compute the new tag checksum on the new in-memory data.
-            file_in_rw_mode.seek(volname_file_offset)
-            file_in_rw_mode.write(bytes(volname_field))
-            self._file.seek(volname_file_offset)
-            self._file.write(bytes(volname_field))
-
-            # Read the field back from disk to verify the on-disk write:
-            file_in_rw_mode.seek(volname_file_offset)
-            volname_readback = file_in_rw_mode.read(34)
-            if volname_readback == bytes(volname_field):
-                print(
-                    f"  Verified the new volname at file offset {volname_file_offset:#08x}: '{pascal_to_string(volname_readback)}' -> OK"
-                )
-            else:
-                print(
-                    f"  WARNING: verification FAILED for the new volname at file offset {volname_file_offset:#08x}!"
-                )
-
-            # The volname bytes written above change the sector data, so the per-sector tag
-            # checksum must be updated too -- but ONLY for 20-byte tags (hard-disk images):
-            # 12-byte floppy tags have NO checksum field (byte 11 is the low byte of the
-            # backward link, see calculate_new_tag_checksum()).
-            # For completeness, we update the tag checksum both in the file on disk and in the in-memory copy self._file, even though the latter is not strictly necessary.
-            if self._single_tag_size == 20:
-                new_tag_checksum = self.calculate_new_tag_checksum(
-                    self._mddf_sector_number
-                )
-                tag_checksum_offset = (
-                    self._sector_tag_file_offset(self._mddf_sector_number) + 11
-                )
-                file_in_rw_mode.seek(tag_checksum_offset)
-                file_in_rw_mode.write(bytes([new_tag_checksum]))
-                self._file.seek(tag_checksum_offset)
-                self._file.write(bytes([new_tag_checksum]))
-                file_in_rw_mode.seek(tag_checksum_offset)
-                tag_checksum_readback = file_in_rw_mode.read(1)[0]
-                if tag_checksum_readback == new_tag_checksum:
-                    print(
-                        f"  Updated tag checksum byte 11 to {new_tag_checksum:#04x} at file offset {tag_checksum_offset:#08x} -> OK"
-                    )
-                else:
-                    print(
-                        f"  WARNING: tag checksum read-back test failed: {tag_checksum_readback:#04x} != expected {new_tag_checksum:#04x} for MDDF sector {self._mddf_sector_number}!"
-                    )
-            else:
-                print(
-                    "  (12-byte floppy tags have no per-sector checksum; no tag update needed.)"
-                )
 
         # Update the Data and Tags DC42 checksum values in the DC42 header (if this is a DC42 disk image file):
         # they are now wrong because we changed the sector data.
         # (No confirmation prompt: the user already confirmed above.)
         self.fix_dc42_checksum(confirm=False)
+
+    def print_pram_snapshot(self) -> bytes:
+        """Print the parameter memory (PRAM) snapshot kept in the MDDF, with its device configuration. Returns the 64 PRAM bytes."""
+        pram = bytes(
+            self._mddf_sector_bytes[PRAM_SNAPSHOT_MDDF_OFFSET : PRAM_SNAPSHOT_MDDF_OFFSET + PRAM_SIZE]
+        )
+        version, timestamp = struct.unpack(">HH", pram[0:4])
+        stored_checksum = struct.unpack(">H", pram[62:64])[0]
+        checksum_ok = is_pram_checksum_valid(pram)
+        print("\nParameter memory (PRAM) snapshot in the MDDF (MDDF offset 210, 64 bytes):")
+        print(f"  {pram.hex(' ')}")
+        print(
+            f"  Version: {version}{' (LOS 3.x)' if version == PRAM_VERSION_LOS3 else ' (pre-LOS 3.0 format, no device configuration)'}"
+            f", TimeStamp: {timestamp:#06x}, BootVol: {pram[4] >> 4}"
+            f", Checksum: {stored_checksum:#06x} ({'valid' if checksum_ok else 'INVALID, expected ' + format(compute_pram_checksum(pram), '#06x')})"
+            f", pmem_id (serial # of the machine that wrote it): {struct.unpack('>I', self._mddf_sector_bytes[204:208])[0]:#010x}"
+        )
+        if version == PRAM_VERSION_LOS3:
+            try:
+                entries = decode_pram_device_entries(pram)
+            except ValueError as e:
+                print(f"  Cannot decode the device configuration: {e}")
+                return pram
+            print(f"  Configured devices ({pram[PRAM_CDCOUNT_OFFSET]} entries according to CDcount):")
+            if not entries:
+                print("    (none)")
+            for e in entries:
+                ext = f", extension words: {' '.join(f'{w:04x}' for w in e['ext_words'])}" if e["ext_words"] else ""
+                print(
+                    f"    {pram_position_to_string(e['slot'], e['chan'], e['dev']):42s} driver {e['driver_id']}"
+                    f" ({PRAM_DRIVER_NAMES.get(e['driver_id'], 'unknown')}){ext}"
+                )
+        return pram
+
+    def change_boot_id(self, target: str | None) -> None:
+        """
+        Make a LOS 3.x boot volume bootable from another boot device position ("change-boot-id" command).
+
+        Why images are tied to a boot position: at boot, the OS looks up the position of the boot device
+        (from the boot ROM, low-memory byte $1B3, and the I/O board type) in the device configuration
+        kept in parameter memory (PRAM). If the PRAM of the machine is invalid (common on real Lisas, whose
+        PRAM battery is dead or removed, and in LisaEm when lisaem.conf has no [pram] section), the OS
+        first copies the PRAM snapshot from the MDDF of the boot disk into the PRAM. So the snapshot on the
+        disk decides where the disk may boot from. When it has no entry for the boot position (e.g. a disk
+        set up on a Lisa 2/10, whose internal disk is a built-in position that needs no entry, then booted
+        from the parallel port of a Lisa 2/5), the boot fails with error 10738 "can't find boot cd"
+        (INIT_BOOT_CDS in SOURCE-STARTUP.TEXT).
+
+        This adds the missing entries (see boot_target_to_pram_entries()) to the snapshot, keeps all
+        others, recomputes the PRAM checksum, and writes the MDDF back (fixing the tag and DC42 checksums).
+        With target=None it only prints the current snapshot.
+        """
+        pram = self.print_pram_snapshot()
+        if target is None:
+            print(
+                "\nTo make this volume bootable from another position, pass one of these targets:"
+                "\n  parallel     a ProFile/ESProfile on the built-in parallel port (Lisa 2/5, Lisa 1; I/O ROM A8 or 40)"
+                "\n  internal     the internal disk of a Lisa 2/10 (I/O ROM 88): always works, needs no entry"
+                "\n  slotN-portM  a ProFile on port M (1 or 2) of a 2-port parallel card in slot N (1..3)"
+                "\n  all-parallel all of the above (replaces printers on parallel ports, skips slots with other cards)"
+            )
+            return
+
+        description, required_entries = boot_target_to_pram_entries(target)
+        if self._fs_version < 16:
+            raise ValueError(
+                f"this is a file system version {self._fs_version} volume (LOS 1.x/2.x). Only LOS 3.x volumes"
+                " (file system version 16/17) keep a device configuration in the PRAM snapshot."
+            )
+        version = struct.unpack(">H", pram[0:2])[0]
+        if version != PRAM_VERSION_LOS3:
+            raise ValueError(
+                f"the PRAM snapshot in the MDDF has version {version}, not {PRAM_VERSION_LOS3}"
+                " (has this volume ever been booted with LOS 3.x?)."
+            )
+        if not is_pram_checksum_valid(pram):
+            raise ValueError(
+                "the PRAM snapshot in the MDDF has an invalid checksum, so the OS would ignore it anyway."
+            )
+        entries = decode_pram_device_entries(pram)
+
+        print(f"\nTarget: {description}.")
+        if not required_entries:
+            print(
+                "This is a built-in position that needs no entry in the device configuration:"
+                " the volume can already boot from it. Nothing to do."
+            )
+            return
+
+        # A parallel port (#11, or a port of a 2-port card) configured with another device (e.g. a printer,
+        # "Parallel Cable") gets the Profile driver instead. An expansion slot configured with another card
+        # (e.g. a Priam card) is not a parallel port: a single slotN-portM target fails, while "all-parallel"
+        # skips that whole slot:
+        skip_slots_with_other_cards = target.strip().lower() == "all-parallel"
+        skipped_slots: set[int] = set()
+        skipped_any = False
+        new_entries = [dict(e) for e in entries]
+        changes: list[str] = []
+        for req in required_entries:
+            if req["slot"] in skipped_slots:
+                continue
+            where = pram_position_to_string(req["slot"], req["chan"], req["dev"])
+            want = f"driver {req['driver_id']} ({PRAM_DRIVER_NAMES[req['driver_id']]})"
+            existing = next(
+                (
+                    e
+                    for e in new_entries
+                    if (e["slot"], e["chan"], e["dev"]) == (req["slot"], req["chan"], req["dev"])
+                ),
+                None,
+            )
+            if existing is None:
+                new_entries.append(dict(req))
+                changes.append(f"add {where}: {want}")
+            elif existing["driver_id"] != req["driver_id"]:
+                have = f"driver {existing['driver_id']} ({PRAM_DRIVER_NAMES.get(existing['driver_id'], 'unknown')})"
+                if req["chan"] == 0 and 1 <= req["slot"] <= 3:
+                    if skip_slots_with_other_cards:
+                        skipped_any = True
+                        skipped_slots.add(req["slot"])
+                        print(
+                            f"  Skipping expansion slot {req['slot']}: it is configured with {have}, not a 2 Port Card,"
+                            " so it has no parallel ports."
+                        )
+                        continue
+                    raise ValueError(
+                        f"expansion slot {req['slot']} is configured with {have}, not a 2 Port Card."
+                        " Pick another slot, or reconfigure it in LOS Preferences."
+                    )
+                existing["driver_id"] = req["driver_id"]
+                existing["ext_words"] = list(req["ext_words"])
+                changes.append(f"replace {where}: {have} -> {want}")
+        if not changes:
+            print(
+                (
+                    "The device configuration already has every entry that can be added (the slots"
+                    " with other cards were skipped). Nothing to do."
+                    if skipped_any
+                    else "The device configuration already has the entries for this position. Nothing to do."
+                )
+                +
+                "\nIf the volume still does not boot from there, the PRAM of the machine (or the [pram] section"
+                " of lisaem.conf) is valid and has priority over this snapshot: clear it (see PRAM.md)."
+            )
+            return
+
+        packed = b"".join(encode_pram_device_entry(e) for e in new_entries)
+        if PRAM_DEVCONFIG_OFFSET + len(packed) > PRAM_DEVCONFIG_LIMIT:
+            raise ValueError(
+                f"the device configuration would need {len(packed)} bytes, but the PRAM has room for only"
+                f" {PRAM_DEVCONFIG_LIMIT - PRAM_DEVCONFIG_OFFSET}. Remove some devices in LOS Preferences first."
+            )
+        new_pram = bytearray(pram)
+        new_pram[PRAM_CDCOUNT_OFFSET] = len(new_entries)
+        new_pram[PRAM_DEVCONFIG_OFFSET:60] = packed + b"\xff" * (60 - PRAM_DEVCONFIG_OFFSET - len(packed))
+        new_pram[62:64] = struct.pack(">H", compute_pram_checksum(new_pram))
+        # Sanity check: what we wrote must decode back to what we meant:
+        assert is_pram_checksum_valid(new_pram) and decode_pram_device_entries(new_pram) == new_entries
+
+        print("Changes to the device configuration in the PRAM snapshot:")
+        for c in changes:
+            print(f"  {c}")
+        answer = input(
+            f"\nNow will rewrite the PRAM snapshot in the MDDF. This will modify the disk image file '{self._file_name}'. Trust me? [y/N] "
+        )
+        if answer.strip().lower() not in ("y", "yes"):
+            print("Aborted by user; the disk image was not modified.")
+            return
+        if not self._write_into_mddf_sector(PRAM_SNAPSHOT_MDDF_OFFSET, bytes(new_pram), "PRAM snapshot"):
+            return
+        self.fix_dc42_checksum(confirm=False)
+        print(
+            "\nNote: the OS uses this snapshot only when the PRAM of the machine is invalid (dead/removed battery"
+            " on a real Lisa; no [pram] section in lisaem.conf for LisaEm). A valid PRAM has priority, and the OS"
+            " then copies it over this snapshot at boot. See PRAM.md for how to clear it."
+        )
+
+    def _write_into_mddf_sector(self, offset_in_sector: int, new_bytes: bytes, what: str) -> bool:
+        """
+        Write new_bytes at offset_in_sector of the MDDF sector, both in the file on disk and in the in-memory
+        copy, read it back to verify, and fix the per-sector tag checksum (20-byte tags only). The caller must
+        then fix the DC42 header checksums. Returns False if the file could not be opened for writing.
+        """
+        file_offset = self._sector_data_file_offset(self._mddf_sector_number) + offset_in_sector
+        try:
+            file_in_rw_mode = open(self._file_name, "r+b")
+        except OSError as e:
+            print(f"ERROR: cannot open '{self._file_name}' for writing: {e}")
+            return False
+        with file_in_rw_mode:
+            file_in_rw_mode.seek(file_offset)
+            file_in_rw_mode.write(new_bytes)
+            self._file.seek(file_offset)
+            self._file.write(new_bytes)
+            file_in_rw_mode.seek(file_offset)
+            if file_in_rw_mode.read(len(new_bytes)) == new_bytes:
+                print(f"  Verified the new {what} at file offset {file_offset:#08x} -> OK")
+            else:
+                print(f"  WARNING: verification FAILED for the new {what} at file offset {file_offset:#08x}!")
+            if self._single_tag_size == 20:
+                new_tag_checksum = self.calculate_new_tag_checksum(self._mddf_sector_number)
+                tag_checksum_offset = self._sector_tag_file_offset(self._mddf_sector_number) + 11
+                file_in_rw_mode.seek(tag_checksum_offset)
+                file_in_rw_mode.write(bytes([new_tag_checksum]))
+                self._file.seek(tag_checksum_offset)
+                self._file.write(bytes([new_tag_checksum]))
+                file_in_rw_mode.seek(tag_checksum_offset)
+                if file_in_rw_mode.read(1)[0] == new_tag_checksum:
+                    print(
+                        f"  Updated tag checksum byte 11 to {new_tag_checksum:#04x} at file offset {tag_checksum_offset:#08x} -> OK"
+                    )
+                else:
+                    print(f"  WARNING: tag checksum read-back test failed for MDDF sector {self._mddf_sector_number}!")
+        return True
 
     def calculate_new_tag_checksum(self, sector_number: int) -> int:
         """
@@ -3659,6 +3818,226 @@ def compute_dc42_checksum(data_bytes: bytes | bytearray | memoryview) -> int:
     return checksum
 
 
+# ---------------------------------------------------------------------------------------------------
+# Parameter memory (PRAM) snapshot in the MDDF, and the device configuration in it (LOS 3.x).
+#
+# The Lisa keeps 64 bytes of battery-backed "parameter memory" (PRAM). LOS 3.x stores in it, besides the
+# Preferences settings, the list of configured devices (which driver controls which slot/channel/device
+# position). The OS keeps a "snapshot" copy of the PRAM in the MDDF of the boot volume (MDDF field "pmem",
+# a rec_param_mem = alarm_ref (2 bytes) + parm_mem (64 bytes), at MDDF offset 208; so the 64 PRAM bytes
+# start at MDDF offset 210). At boot (INIT_CONFIG in SOURCE-STARTUP), if the PRAM of the machine is invalid
+# (bad checksum/version, e.g. a dead or removed battery, or a LisaEm config without a [pram] section),
+# the snapshot is copied from the disk into the PRAM. Then INIT_BOOT_CDS/FIND_PM_IDS looks in the PRAM for an
+# entry at the position of the boot device; if there is none, the boot fails with error 10738
+# ("can't find boot cd"). See the "change-boot-id" command.
+#
+# PRAM layout (see "pmem" in SOURCE-STARTUP.TEXT): 0-1 Version (4 for LOS 3.x), 2-3 TimeStamp, 4 BootVol
+# and contrast nibbles, 5-8 other Preferences settings, 9 CDcount (number of device entries),
+# 10-59 DevConfig (the packed device entries, unused bytes are 0xFF), 60-61 MemLoss, 62-63 Checksum.
+# ---------------------------------------------------------------------------------------------------
+PRAM_SNAPSHOT_MDDF_OFFSET = 210  # = MDDF "pmem" field (208) + 2 bytes of alarm_ref
+PRAM_SIZE = 64
+PRAM_VERSION_LOS3 = 4  # cd_pm_version in SOURCE-STARTUP.TEXT
+PRAM_CDCOUNT_OFFSET = 9
+PRAM_DEVCONFIG_OFFSET = 10
+PRAM_DEVCONFIG_LIMIT = 59  # PutNxtConfig: an entry must end at or before this offset (exclusive)
+
+# Generic (public) slot numbers, from source-syscall.text (the OS internally uses these minus 1):
+PRAM_SLOT_NAMES = {
+    1: "expansion slot 1",
+    2: "expansion slot 2",
+    3: "expansion slot 3",
+    10: "serial ports (SCC)",
+    11: "built-in parallel port",
+    12: "internal disk (Lisa 2/10)",
+    13: "Sony floppy",
+    14: "Twiggy floppy",
+    15: "console",
+}
+PRAM_SLOT_PARALLEL_PORT = 11
+
+# Driver ids, as found in SYSTEM.CDD of LOS 3.1 (the driver code is in the file "SYSTEM.CD_<name>"):
+PRAM_DRIVER_ID_2_PORT_CARD = 34
+PRAM_DRIVER_ID_PROFILE = 35
+PRAM_DRIVER_NAMES = {
+    32: "Serial Cable",
+    33: "Parallel Cable",
+    34: "2 Port Card",
+    35: "Profile",
+    36: "Sony",
+    37: "Priam Card",
+    38: "Priam Disk",
+    39: "Archive Tape",
+    40: "Console",
+    42: "Modem A",
+}
+
+
+def pram_position_to_string(slot: int, chan: int, dev: int) -> str:
+    """Format a (public) PRAM device position the way LOS names it, e.g. '#11' or '#2#1', plus a description."""
+    name = "#" + str(slot)
+    if chan != 0:
+        name += "#" + str(chan)
+        if dev != 0:
+            name += "#" + str(dev)
+    description = PRAM_SLOT_NAMES.get(slot, "unknown slot")
+    if slot == 10 and chan in (1, 2):
+        description = "serial port " + ("A" if chan == 1 else "B")
+    elif 1 <= slot <= 3 and chan != 0:
+        description += f", port {chan}"
+    return f"{name} ({description})"
+
+
+def compute_pram_checksum(pram: bytes | bytearray) -> int:
+    """
+    Compute the PRAM checksum word (PRAM bytes 62-63) of a 64-byte PRAM image.
+
+    The boot ROM routine at $FE00BC (called by VERIFY_CKSUM/Calc_Cksum in the OS) does, for each 16-bit
+    big-endian word: acc = rol16(acc + word). The PRAM is valid when this, over all 32 words, gives 0, so the
+    checksum word is the negated accumulator over the first 31 words. (Verified on ~60 disk images.)
+    """
+    acc = 0
+    for (word,) in struct.iter_unpack(">H", bytes(pram[0:62])):
+        acc = (acc + word) & 0xFFFF
+        acc = ((acc << 1) | (acc >> 15)) & 0xFFFF
+    return (-acc) & 0xFFFF
+
+
+def is_pram_checksum_valid(pram: bytes | bytearray) -> bool:
+    return compute_pram_checksum(pram) == struct.unpack(">H", bytes(pram[62:64]))[0]
+
+
+def decode_pram_device_entries(pram: bytes | bytearray) -> list[dict[str, Any]]:
+    """
+    Decode the device configuration entries (PRAM bytes 10-59), the way GetNxtConfig/CRAK_PM do
+    (SOURCE-PMEM.TEXT, SOURCE-CDCONFIGASM.TEXT). Each packed entry is:
+      byte 0: slot (4 bits) | chan (3 bits) | IDsize (1 bit)
+      byte 1: dev (5 bits) | nExtWords (2 bits) | bit 8 (short id) or bit 16 (long id) of the driver id
+      then 1 (IDsize=0) or 2 (IDsize=1) more bytes of the driver id, then nExtWords 16-bit words.
+    The stored slot/chan/dev are the public numbers minus 1 (15/7/31 mean 'none'). A stored slot of 15
+    ends the list. Returns dicts with public 'slot', 'chan', 'dev' (0 = none), 'driver_id', 'ext_words'.
+    """
+    entries: list[dict[str, Any]] = []
+    offset = PRAM_DEVCONFIG_OFFSET
+    while offset <= 57:  # GetNxtConfig: "if offset > 57 then (no more)"
+        b0 = pram[offset]
+        stored_slot = b0 >> 4
+        if stored_slot == 15:
+            break
+        stored_chan = (b0 >> 1) & 7
+        id_size = b0 & 1
+        b1 = pram[offset + 1]
+        stored_dev = b1 >> 3
+        n_ext = (b1 >> 1) & 3
+        driver_id = b1 & 1
+        pos = offset + 2
+        for _ in range(1 + id_size):
+            driver_id = (driver_id << 8) | pram[pos]
+            pos += 1
+        ext_words = []
+        for _ in range(n_ext):
+            ext_words.append(struct.unpack(">H", bytes(pram[pos : pos + 2]))[0])
+            pos += 2
+        if pos > PRAM_DEVCONFIG_LIMIT + 1:
+            raise ValueError(
+                f"the PRAM device entry at PRAM offset {offset} runs past the end of the device configuration area."
+            )
+        entries.append(
+            {
+                "slot": stored_slot + 1,
+                "chan": 0 if stored_chan == 7 else stored_chan + 1,
+                "dev": 0 if stored_dev == 31 else stored_dev + 1,
+                "driver_id": driver_id,
+                "ext_words": ext_words,
+            }
+        )
+        offset = pos
+    return entries
+
+
+def encode_pram_device_entry(entry: dict[str, Any]) -> bytes:
+    """Pack one device entry (public slot/chan/dev numbers) the way PutNxtConfig/PACK_PM do."""
+    slot, chan, dev = entry["slot"], entry["chan"], entry["dev"]
+    driver_id = entry["driver_id"]
+    ext_words = entry["ext_words"]
+    if not (1 <= slot <= 15 and 0 <= chan <= 7 and 0 <= dev <= 31 and len(ext_words) <= 3):
+        raise ValueError(f"invalid PRAM device entry {entry}.")
+    if not 0 <= driver_id < (1 << 17):
+        raise ValueError(f"driver id {driver_id} does not fit in 17 bits.")
+    stored_slot = slot - 1
+    stored_chan = 7 if chan == 0 else chan - 1
+    stored_dev = 31 if dev == 0 else dev - 1
+    id_size = 0 if driver_id < 512 else 1
+    high_id_bit = (driver_id >> (8 if id_size == 0 else 16)) & 1
+    out = bytearray(
+        [
+            (stored_slot << 4) | (stored_chan << 1) | id_size,
+            (stored_dev << 3) | (len(ext_words) << 1) | high_id_bit,
+        ]
+    )
+    if id_size == 1:
+        out.append((driver_id >> 8) & 0xFF)
+    out.append(driver_id & 0xFF)
+    for word in ext_words:
+        out += struct.pack(">H", word)
+    return bytes(out)
+
+
+def boot_target_to_pram_entries(target: str) -> tuple[str, list[dict[str, Any]]]:
+    """
+    Translate a change-boot-id target name into (description, the PRAM device entries the boot device needs).
+
+    Supported targets:
+      parallel     - a ProFile (or ESProfile) on the built-in parallel port of a Lisa 2/5 or Lisa 1
+                     (I/O ROM A8 or 40). The OS needs a "Profile" entry at position #11.
+      internal     - the internal disk of a Lisa 2/10 (I/O ROM 88). This is a built-in position: the OS
+                     always knows it (GetNxtConfig returns it with the Profile driver), no entry is needed.
+      slotN-portM  - a ProFile on port M (1 or 2) of a 2-port parallel card in expansion slot N (1..3).
+                     The OS needs the "2 Port Card" entry at #N and a "Profile" entry at #N#M.
+      all-parallel - all of the above: #11, and #N, #N#1, #N#2 for N = 1, 2, 3 (10 entries, 30 bytes).
+                     change_boot_id() replaces a printer on a parallel port, but skips a slot with another card.
+    """
+    t = target.strip().lower()
+    if t == "parallel":
+        return (
+            "a ProFile on the built-in parallel port (Lisa 2/5, Lisa 1; I/O ROM A8 or 40)",
+            [{"slot": PRAM_SLOT_PARALLEL_PORT, "chan": 0, "dev": 0, "driver_id": PRAM_DRIVER_ID_PROFILE, "ext_words": []}],
+        )
+    if t == "internal":
+        return ("the internal disk of a Lisa 2/10 (I/O ROM 88)", [])
+    if t == "all-parallel":
+        entries = list(boot_target_to_pram_entries("parallel")[1])
+        for slot in (1, 2, 3):
+            entries += boot_target_to_pram_entries(f"slot{slot}-port1")[1]
+            entries += boot_target_to_pram_entries(f"slot{slot}-port2")[1][1:]  # the card entry only once
+        return (
+            (
+                "every position a Lisa can boot a ProFile from: the built-in parallel port (Lisa 2/5), the"
+                " internal disk (Lisa 2/10, needs no entry) and both ports of a 2-port card in slots 1, 2 and 3"
+            ),
+            entries,
+        )
+    if (
+        len(t) == len("slotN-portM")
+        and t.startswith("slot")
+        and t[5:10] == "-port"
+        and t[4] in "123"
+        and t[10] in "12"
+    ):
+        slot, port = int(t[4]), int(t[10])
+        return (
+            f"a ProFile on port {port} of a 2-port parallel card in expansion slot {slot}",
+            [
+                {"slot": slot, "chan": 0, "dev": 0, "driver_id": PRAM_DRIVER_ID_2_PORT_CARD, "ext_words": []},
+                {"slot": slot, "chan": port, "dev": 0, "driver_id": PRAM_DRIVER_ID_PROFILE, "ext_words": []},
+            ],
+        )
+    raise ValueError(
+        f"unknown boot target '{target}'. Use one of: parallel, internal, all-parallel, slot1-port1, slot1-port2, "
+        "slot2-port1, slot2-port2, slot3-port1, slot3-port2."
+    )
+
+
 def disk_type_to_string(disk_type: int) -> str:
     if disk_type == 0x00:
         return "sony400k"
@@ -4015,6 +4394,7 @@ if __name__ == "__main__":
         "fix-sector-checksums",
         "rename-volume",
         "list-los",
+        "change-boot-id",
     )
 
     def _print_usage() -> None:
@@ -4059,6 +4439,11 @@ if __name__ == "__main__":
             "  rename-volume <name>  Rename the volume: rewrite the 'volname' field (a Pascal string of up to"
             " 33 characters) at offset 12 of the MDDF sector, and fix up all affected checksums."
         )
+        print(
+            "  change-boot-id [target]  (LOS 3.x) Show the device configuration in the PRAM snapshot of the MDDF;"
+            " with a target (parallel, internal, all-parallel, slot1-port1 .. slot3-port2), add the entries the OS needs to"
+            " boot from that position (fixes boot error 10738 after moving a ProFile/ESProfile)."
+        )
 
     if len(sys.argv) < 2:
         _print_usage()
@@ -4073,7 +4458,16 @@ if __name__ == "__main__":
 
     new_volume_name: str | None = None
     dump_output_dir: str | None = None
-    if command == "rename-volume":
+    boot_target: str | None = None
+    if command == "change-boot-id":
+        if len(sys.argv) not in (3, 4):
+            print(
+                "Usage: python LisaFileSystemTool.py change-boot-id <disk image file name> [parallel|internal|all-parallel|slotN-portM]"
+            )
+            sys.exit(1)
+        file_name = sys.argv[2]
+        boot_target = sys.argv[3] if len(sys.argv) == 4 else None
+    elif command == "rename-volume":
         if len(sys.argv) != 4:
             print(
                 "Usage: python LisaFileSystemTool.py rename-volume <disk image file name> <new volume name>"
@@ -4181,5 +4575,20 @@ if __name__ == "__main__":
             # No interactive terminal (stdin closed/redirected): don't prompt, just skip.
             print(
                 "No interactive terminal for the confirmation prompt; skipping rename_volume()."
+            )
+    elif command == "change-boot-id":
+        try:
+            if boot_target is None:
+                file_system.change_boot_id(None)
+            elif file_system._confirm_proceed_if_disk_image_is_open_by_other_process():
+                file_system.change_boot_id(boot_target)
+            else:
+                print("Aborted by user; the disk image was not modified.")
+        except ValueError as e:
+            print(f"ERROR: {e} The disk image was not modified.")
+            sys.exit(1)
+        except EOFError:
+            print(
+                "No interactive terminal for the confirmation prompt; skipping change_boot_id()."
             )
     # That's all, Folks!
