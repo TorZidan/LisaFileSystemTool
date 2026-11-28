@@ -9,14 +9,17 @@ parallel port of a Lisa 2/5 (I/O ROM A8). It also describes how the `change-boot
 The findings come from the LOS sources (`LISA_OS/OS/` in the Apple Lisa source code release of the
 Computer History Museum); the source file and routine names are given in parentheses.
 
-## 1. The PRAM and its snapshot in the MDDF
+## 1. The PRAM and its snapshot in the MDDF sector on the boot volume
 
-The Lisa has 64 bytes of battery-backed parameter memory (PRAM). LOS 3.x keeps in it the
-Preferences settings **and the device configuration**: which driver controls which
-slot/channel/device position. The PRAM lives at the odd addresses `$FCC181`..`$FCC1FF` of the I/O
+The Lisa has 64 bytes of battery-backed parameter memory (PRAM). It contains various machine settings
+(see below). They can be edited and updated in the PRAM using the Preferences LOS desktop app. 
+The relevant settings here are the the **device configuration**: which driver controls which
+slot/channel/device position. 
+
+The PRAM lives at the odd addresses `$FCC181`..`$FCC1FF` of the I/O
 board's shared memory (`INIT_READ_PM`/`INIT_WRITE_PM` in `source-STARASM2.TEXT`).
 
-The OS also keeps a *snapshot* of the PRAM in the MDDF of the boot volume: field `pmem` at MDDF
+The OS also keeps a *snapshot* of the PRAM in the MDDF sector of the boot volume: field `pmem` at MDDF
 offset 208 is `alarm_ref` (2 bytes) followed by the 64 PRAM bytes (MDDF offsets 210..273). When LOS
 writes the PRAM (e.g. from Preferences, `Write_PMem` in `SOURCE-PMEM.TEXT`), it updates the timestamp
 and checksum and writes both the PRAM and the snapshot (`PMSnapshot` in `source-fsui3.text`).
@@ -25,11 +28,11 @@ The PRAM layout (`pmem` in `SOURCE-STARTUP.TEXT`):
 
 | PRAM offset | Field |
 |-------------|-------|
-| 0-1 | `Version` (4 for LOS 3.x; LOS 1.x/2.x use version 2, without a device configuration) |
+| 0-1 | `Version` (4 for LOS 3.x; LOS 1.x/2.x use version 2; it uses no `DevConfig`) |
 | 2-3 | `TimeStamp` |
 | 4-8 | `BootVol` (high nibble of byte 4), contrast, beep volume, mouse, repeat-rate, ... settings |
 | 9 | `CDcount`: the number of device entries |
-| 10-59 | `DevConfig`: the packed device entries, unused bytes are `0xFF` |
+| 10-59 | `DevConfig`: the packed device entries (this is what we are interested in), unused bytes are `0xFF` |
 | 60-61 | `MemLoss` |
 | 62-63 | `Checksum`: over the 32 big-endian words, `acc = rol16(acc + word)` must end up 0 (boot ROM routine at `$FE00BC`; verified on ~60 disk images) |
 
@@ -42,7 +45,7 @@ At boot, the OS decides whether the PRAM of the machine is *valid* with two test
 2. **The version is 4** (`cd_pm_version`, the LOS 3.x format).
 
 If either test fails, the PRAM is *invalid*, and the OS does not use what is in it. The same two
-tests decide whether the snapshot in the MDDF is valid.
+tests decide whether the snapshot in the MDDF sector is valid.
 
 Typical causes of an invalid PRAM:
 
@@ -102,7 +105,7 @@ For example `ae f8 23` is "Profile (35) at #11, the built-in parallel port", and
 At boot (`INIT_CONFIG`, `INIT_BOOT_CDS`, `FIND_BOOT` and `FIND_PM_IDS` in `SOURCE-STARTUP.TEXT`):
 
 1. If the PRAM of the machine is invalid (bad checksum or version, see §1.1), the OS copies the snapshot from
-   the MDDF into the PRAM. This is the usual case on real Lisas with a dead or removed PRAM battery,
+   the MDDF sector into the PRAM. This is the usual case on real Lisas with a dead or removed PRAM battery,
    and in LisaEm when the PRAM lines of the config file are missing or zeroed (see §5). If the PRAM is
    valid, it wins, and the OS later copies it over the snapshot.
 2. The OS derives the boot position from the boot ROM's boot device byte (`$1B3`) and the I/O
